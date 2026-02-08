@@ -30,6 +30,14 @@ function Write-Log {
     } catch {}
 }
 
+function Log {
+    param(
+        [Parameter(Mandatory=$true)][string]$m,
+        [ValidateSet('INFO','WARN','ERROR')][string]$Level = 'INFO'
+    )
+    Write-Log -Message $m -Level $Level
+}
+
 function Coalesce {
     param(
         [Parameter(Mandatory=$true)][AllowNull()][object]$Value,
@@ -78,28 +86,38 @@ try {
     $osCaption = 'Unknown/WinRE'
 }
 Write-Log ("PowerShell: {0}, OS: {1}" -f $PSVersionTable.PSVersion, $osCaption)
-# Simple WinRE driver bootstrap + one-partition disk prep (PS 5.1)
-
-$ErrorActionPreference = 'Stop'
-
-function Log { param([string]$m) Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $m) }
 
 function Enable-Tls12 {
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 }
 
 function Download-File {
-    param([string]$Url, [string]$DestPath)
+    param(
+        [Parameter(Mandatory=$true)][string]$Url,
+        [Parameter(Mandatory=$true)][string]$DestPath,
+        [int]$Retries = 2
+    )
     Enable-Tls12
-    Log "Downloading: $Url"
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-    if ($curl) {
-        & $curl --fail --location --silent --show-error -o "$DestPath" "$Url"
-        if ($LASTEXITCODE -ne 0) { throw "curl download failed." }
-    } else {
-        Invoke-WebRequest -Uri $Url -OutFile $DestPath -UseBasicParsing
+    for ($i=0; $i -le $Retries; $i++) {
+        Log ("Downloading: {0} (attempt {1}/{2})" -f $Url, ($i+1), ($Retries+1))
+        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+        try {
+            if ($curl) {
+                & curl.exe --fail --location --silent --show-error -o "$DestPath" "$Url"
+                if ($LASTEXITCODE -ne 0) { throw "curl download failed with exit code $LASTEXITCODE." }
+            } else {
+                Invoke-WebRequest -Uri $Url -OutFile $DestPath -UseBasicParsing
+            }
+            if (Test-Path -LiteralPath $DestPath) { return }
+            throw "Download succeeded but file missing on disk."
+        } catch {
+            if ($i -lt $Retries) {
+                Start-Sleep -Seconds 2
+            } else {
+                throw $_
+            }
+        }
     }
-    if (-not (Test-Path -LiteralPath $DestPath)) { throw "Download failed: file missing." }
 }
 
 function Get-InternalTargetDisk {
@@ -113,7 +131,6 @@ function Get-InternalTargetDisk {
     } | Sort-Object Size -Descending
 
     if (-not $preferred -or $preferred.Count -eq 0) {
-        # Try to bring internal disks online (best effort) and re-filter
         foreach ($d in (Get-Disk | Where-Object { $_.BusType -ne 'USB' -and $_.IsOffline })) {
             try { Set-Disk -Number $d.Number -IsOffline:$false -ErrorAction Stop } catch {}
         }
@@ -131,7 +148,7 @@ function Get-InternalTargetDisk {
 }
 
 function Prep-Disk-OnePartition {
-    param([int]$DiskNumber)
+    param([Parameter(Mandatory=$true)][int]$DiskNumber)
 
     Log "Clearing Disk $DiskNumber (this erases ALL data)"
     Set-Disk -Number $DiskNumber -IsReadOnly:$false -ErrorAction SilentlyContinue | Out-Null
@@ -142,7 +159,7 @@ function Prep-Disk-OnePartition {
 
     Log "Creating single NTFS partition and assigning drive letter"
     $part = New-Partition -DiskNumber $DiskNumber -UseMaximumSize -AssignDriveLetter
-    # Force it to C:
+
     try {
         # If C: exists, remove access path from that partition first
         $cPart = Get-Partition -DriveLetter C -ErrorAction SilentlyContinue
@@ -150,6 +167,7 @@ function Prep-Disk-OnePartition {
             Remove-PartitionAccessPath -DiskNumber $cPart.DiskNumber -PartitionNumber $cPart.PartitionNumber -AccessPath "C:\" -ErrorAction SilentlyContinue
         }
     } catch {}
+
     Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel "Windows" -Confirm:$false -Force
     Set-Partition -DiskNumber $part.DiskNumber -PartitionNumber $part.PartitionNumber -NewDriveLetter C | Out-Null
     Log "Disk prepared. C: ready."
@@ -170,42 +188,46 @@ function Get-DeviceSkuName {
 }
 
 function Extract-SoftPaq {
-    param([string]$ExePath, [string]$DestDir)
+    param(
+        [Parameter(Mandatory=$true)][string]$ExePath,
+        [Parameter(Mandatory=$true)][string]$DestDir
+    )
     if (-not (Test-Path -LiteralPath $ExePath)) { throw "SoftPaq not found: $ExePath" }
     if (-not (Test-Path -LiteralPath $DestDir)) { New-Item -ItemType Directory -Path $DestDir -Force | Out-Null }
 
-    # Common HP SoftPaq silent extract: /e /s /f "<dir>"
     Log "Extracting SoftPaq silently → $DestDir"
     & "$ExePath" /e /s /f "$DestDir"
-    if ($LASTEXITCODE -ne 0) {
-        # Some SoftPaqs use -e -s -f
+    $exit1 = $LASTEXITCODE
+    if ($exit1 -ne 0) {
         & "$ExePath" -e -s -f "$DestDir"
     }
     # Basic check: look for INF presence
     $inf = Get-ChildItem -Path $DestDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $inf) { Log "Warning: No INF found yet—extraction may have nested folder, continuing." }
+    if (-not $inf) { Log "Warning: No INF found yet—extraction may have nested folder, continuing." -Level 'WARN' }
 }
 
 function Load-Drivers {
-    param([string]$Root)
+    param([Parameter(Mandatory=$true)][string]$Root)
+
     $infFiles = Get-ChildItem -Path $Root -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+    $infFiles = @($infFiles)
     if (-not $infFiles -or $infFiles.Count -eq 0) { throw "No .inf files found under $Root." }
 
     $drvload = Get-Command drvload.exe -ErrorAction SilentlyContinue
     if ($drvload) {
-        $ok=0;$fail=0
+        $ok = 0; $fail = 0
         foreach ($inf in $infFiles) {
             Log "drvload $inf"
-            & $drvload "$inf"
+            & drvload.exe "$inf"
             if ($LASTEXITCODE -eq 0) { $ok++ } else { $fail++ }
         }
-        Log "drvload results: loaded=$ok, failed=$fail"
+        Log ("drvload results: loaded={0}, failed={1}" -f $ok, $fail)
     } else {
-        # Fallback: pnputil stage+install (best-effort)
         $pnp = Get-Command pnputil.exe -ErrorAction SilentlyContinue
         if (-not $pnp) { throw "Neither drvload nor pnputil is available to load drivers." }
         Log "pnputil /add-driver ""$Root\*.inf"" /subdirs /install"
-        & $pnp /add-driver "$Root\*.inf" /subdirs /install
+        & pnputil.exe /add-driver "$Root\*.inf" /subdirs /install
+        # Note: pnputil exit codes vary; we log and continue.
     }
 }
 
@@ -213,11 +235,13 @@ function Rescan-Devices {
     Log "Rescanning storage (diskpart)..."
     $dp = Join-Path 'X:\' 'rescan.txt'
     @("rescan","list disk","list volume") | Out-File -FilePath $dp -Encoding ascii -Force
-    try { diskpart /s $dp | Out-Null } catch { Log "diskpart rescan failed (continuing)" }
+    try { diskpart /s $dp | Out-Null } catch { Log "diskpart rescan failed (continuing)" -Level 'WARN' }
 
     try { & wpeutil UpdateBootInfo | Out-Null } catch {}
     $pnp = Get-Command pnputil.exe -ErrorAction SilentlyContinue
-    if ($pnp) { try { & $pnp /scan-devices | Out-Null } catch {} }
+    if ($pnp) {
+        try { & pnputil.exe /scan-devices | Out-Null } catch {}
+    }
 }
 
 # ------------------ MAIN ------------------
@@ -246,8 +270,8 @@ try {
 
     Log "Done. C: formatted, drivers injected, devices rescanned."
     Write-Host "Success. You can proceed with imaging or disk operations." -ForegroundColor Green
+    exit 0
 } catch {
     Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
     exit 1
 }
-    exit 2
