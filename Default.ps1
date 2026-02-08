@@ -154,7 +154,7 @@ function Prep-Disk-OnePartition {
     Set-Disk -Number $DiskNumber -IsReadOnly:$false -ErrorAction SilentlyContinue | Out-Null
     Set-Disk -Number $DiskNumber -IsOffline:$false -ErrorAction SilentlyContinue | Out-Null
 
-    Clear-Disk -Number $DiskNumber -RemoveData -Confirm:$false
+    Clear-Disk -Number $DiskNumber -RemoveData -Confirm:$false -RemoveOEM
     Initialize-Disk -Number $DiskNumber -PartitionStyle GPT
 
     Log "Creating single NTFS partition and assigning drive letter"
