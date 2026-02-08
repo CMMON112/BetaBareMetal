@@ -78,277 +78,177 @@ try {
     $osCaption = 'Unknown/WinRE'
 }
 Write-Log ("PowerShell: {0}, OS: {1}" -f $PSVersionTable.PSVersion, $osCaption)
+# Simple WinRE driver bootstrap + one-partition disk prep (PS 5.1)
 
-# ----------------------------
-# Discovery helpers
-# ----------------------------
-function Get-WritableDisks {
-    <#
-      Returns internal, non-USB, non-readonly, online disks >= 16 GB.
-      Accepts RAW or initialized disks; we will (re)initialize as GPT.
-    #>
-    $preferredBuses = @('NVMe','RAID','SATA','SAS','ATA','PCIe')
+$ErrorActionPreference = 'Stop'
 
-    # Try to bring offline disks online (best effort)
-    $offline = Get-Disk | Where-Object {
-        $_.BusType -in $preferredBuses -and $_.IsOffline -eq $true
+function Log { param([string]$m) Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $m) }
+
+function Enable-Tls12 {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+}
+
+function Download-File {
+    param([string]$Url, [string]$DestPath)
+    Enable-Tls12
+    Log "Downloading: $Url"
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & $curl --fail --location --silent --show-error -o "$DestPath" "$Url"
+        if ($LASTEXITCODE -ne 0) { throw "curl download failed." }
+    } else {
+        Invoke-WebRequest -Uri $Url -OutFile $DestPath -UseBasicParsing
     }
-    foreach ($d in $offline) {
-        Write-Log "Attempting to bring Disk $($d.Number) online..." "INFO"
-        try { Set-Disk -Number $d.Number -IsOffline:$false -ErrorAction Stop } catch {}
-    }
+    if (-not (Test-Path -LiteralPath $DestPath)) { throw "Download failed: file missing." }
+}
 
-    # Re-evaluate with consistent filters
-    $minSizeGB = 16
-    $disks = Get-Disk | Where-Object {
-        $_.BusType -in $preferredBuses -and
+function Get-InternalTargetDisk {
+    # Prefer a non-USB, non-removable, online, non-boot/system disk (largest)
+    $preferred = Get-Disk | Where-Object {
+        $_.BusType -ne 'USB' -and
         $_.IsOffline -eq $false -and
         $_.IsReadOnly -eq $false -and
         $_.IsBoot -eq $false -and
-        $_.IsSystem -eq $false -and
-        [math]::Floor($_.Size/1GB) -ge $minSizeGB
+        $_.IsSystem -eq $false
+    } | Sort-Object Size -Descending
+
+    if (-not $preferred -or $preferred.Count -eq 0) {
+        # Try to bring internal disks online (best effort) and re-filter
+        foreach ($d in (Get-Disk | Where-Object { $_.BusType -ne 'USB' -and $_.IsOffline })) {
+            try { Set-Disk -Number $d.Number -IsOffline:$false -ErrorAction Stop } catch {}
+        }
+        $preferred = Get-Disk | Where-Object {
+            $_.BusType -ne 'USB' -and
+            $_.IsOffline -eq $false -and
+            $_.IsReadOnly -eq $false -and
+            $_.IsBoot -eq $false -and
+            $_.IsSystem -eq $false
+        } | Sort-Object Size -Descending
     }
 
-    $disks | Sort-Object -Property Size -Descending
+    if (-not $preferred -or $preferred.Count -eq 0) { throw "No suitable internal disk found (non-USB)." }
+    return ($preferred | Select-Object -First 1)
 }
 
-function Get-HardwareReport {
-    Write-Host ""
-    Write-Log "No writable local disks were found. Printing a concise hardware report for escalation..." "WARN"
+function Prep-Disk-OnePartition {
+    param([int]$DiskNumber)
 
-    try { $cs = Get-CimInstance Win32_ComputerSystem } catch { $cs = $null }
-    try { $bb = Get-CimInstance Win32_BaseBoard } catch { $bb = $null }
-    try { $sysSku = if ($cs) { $cs.SystemSKUNumber } else { $null } } catch { $sysSku = $null }
+    Log "Clearing Disk $DiskNumber (this erases ALL data)"
+    Set-Disk -Number $DiskNumber -IsReadOnly:$false -ErrorAction SilentlyContinue | Out-Null
+    Set-Disk -Number $DiskNumber -IsOffline:$false -ErrorAction SilentlyContinue | Out-Null
 
-    $manu  = Coalesce $(if ($cs) { $cs.Manufacturer } else { $null }) 'N/A'
-    $model = Coalesce $(if ($cs) { $cs.Model } else { $null }) 'N/A'
-    $bbProd = Coalesce $(if ($bb) { $bb.Product } else { $null }) 'N/A'
-    $bbMfg  = Coalesce $(if ($bb) { $bb.Manufacturer } else { $null }) 'N/A'
-    $sysSku = Coalesce $sysSku 'N/A'
-
-    # Storage "mode" best-effort from controller names
-    $mode = "Unknown"
-    try {
-        $controllers = Get-CimInstance Win32_PnPEntity -Filter "PNPClass='SCSIAdapter'"
-        $ctrlNames = $controllers | Select-Object -ExpandProperty Name -ErrorAction SilentlyContinue
-        if ($ctrlNames -match 'NVMe') { $mode = 'NVMe' }
-        elseif ($ctrlNames -match 'RAID|RST|VMD') { $mode = 'RAID' }
-        elseif ($ctrlNames -match 'AHCI') { $mode = 'AHCI' }
-    } catch {}
-
-    # Disk drive HWIDs
-    $diskPnP = @()
-    try {
-        $diskPnP = Get-CimInstance Win32_PnPEntity -Filter "PNPClass='DiskDrive'" | Select-Object Name, Manufacturer, HardwareID
-    } catch {}
-
-    # Chipset/System device HWIDs (PCI)
-    $chipsetPnP = @()
-    try {
-        $chipsetPnP = Get-CimInstance Win32_PnPEntity | Where-Object {
-            $_.PNPClass -eq 'System' -and $_.HardwareID -and ($_.PNPDeviceID -like 'PCI*')
-        } | Select-Object Name, HardwareID
-    } catch {}
-
-    Write-Host "-----------------------------" -ForegroundColor DarkCyan
-    Write-Host " Hardware Summary (Report)   " -ForegroundColor DarkCyan
-    Write-Host "-----------------------------" -ForegroundColor DarkCyan
-    Write-Host (" Manufacturer : {0}" -f $manu)
-    Write-Host (" Model        : {0}" -f $model)
-    Write-Host (" Baseboard    : {0} (Mfg: {1})" -f $bbProd, $bbMfg)
-    Write-Host (" System SKU   : {0}" -f $sysSku)
-    Write-Host (" Storage Mode : {0}" -f $mode)
-    Write-Host ""
-    Write-Host " Disk Hardware IDs:" -ForegroundColor Yellow
-    foreach ($d in $diskPnP) {
-        $mfg = Coalesce $d.Manufacturer ''
-        Write-Host ("  - {0} [{1}]" -f (Coalesce $d.Name 'Unknown'), $mfg)
-        if ($d.HardwareID) {
-            @($d.HardwareID) | Select-Object -First 6 | ForEach-Object {
-                Write-Host ("      * {0}" -f $_)
-            }
-        }
-    }
-    Write-Host ""
-    Write-Host " Chipset / System Device Hardware IDs:" -ForegroundColor Yellow
-    foreach ($c in ($chipsetPnP | Select-Object -First 12)) {
-        Write-Host ("  - {0}" -f (Coalesce $c.Name 'Unknown'))
-        if ($c.HardwareID) {
-            @($c.HardwareID) | Select-Object -First 4 | ForEach-Object {
-                Write-Host ("      * {0}" -f $_)
-            }
-        }
-    }
-    Write-Host ""
-    Write-Host ("Saved a copy to: {0}" -f $script:LogPath) -ForegroundColor DarkGray
-}
-
-# ----------------------------
-# Disk provisioning (Storage cmdlets)
-# ----------------------------
-function Provision-DiskWithStorageCmdlets {
-    param(
-        [Parameter(Mandatory=$true)][int]$DiskNumber,
-        [int]$EfiSizeMB = 260,
-        [int]$MsrSizeMB = 16,
-        [int]$RecoverySizeMB = 1024
-    )
-
-    Write-Log "Preparing Disk $DiskNumber using Storage module..."
-    $disk = Get-Disk -Number $DiskNumber
-
-    if ($disk.IsReadOnly) {
-        Write-Log "Disk is read-only, attempting to clear read-only attribute..." "WARN"
-        Set-Disk -Number $DiskNumber -IsReadOnly:$false
-    }
-    if ($disk.IsOffline) {
-        Write-Log "Disk is offline, bringing online..." "WARN"
-        Set-Disk -Number $DiskNumber -IsOffline:$false
-    }
-
-    Write-Log "Cleaning disk (this will remove ALL partitions)..." "WARN"
     Clear-Disk -Number $DiskNumber -RemoveData -Confirm:$false
-
-    Write-Log "Initializing disk as GPT..."
     Initialize-Disk -Number $DiskNumber -PartitionStyle GPT
 
-    # Create EFI System partition
-    Write-Log "Creating EFI System partition (${EfiSizeMB}MB, FAT32)..."
-    $efi = New-Partition -DiskNumber $DiskNumber -Size ($EfiSizeMB*1MB) -GptType "{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}"
-    Format-Volume -Partition $efi -FileSystem FAT32 -NewFileSystemLabel "SYSTEM" -Confirm:$false -Force
-
-    # Create MSR (unformatted)
-    Write-Log "Creating MSR partition (${MsrSizeMB}MB)..."
-    $msr = New-Partition -DiskNumber $DiskNumber -Size ($MsrSizeMB*1MB) -GptType "{E3C9E316-0B5C-4DB8-817D-F92DF00215AE}"
-
-    # Compute remaining space and carve recovery at END
-    Write-Log "Creating OS placeholder partition (will be repurposed later)..."
-    $sup = Get-PartitionSupportedSize -DiskNumber $DiskNumber
-    $recoveryBytes = $RecoverySizeMB * 1MB
-    $osSize = $sup.SizeMax - $recoveryBytes
-    if ($osSize -le 0) { throw "Not enough space to reserve a recovery partition at the end." }
-
-    $osPart = New-Partition -DiskNumber $DiskNumber -Size $osSize -GptType "{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}"  # Basic data
-    Format-Volume -Partition $osPart -FileSystem NTFS -NewFileSystemLabel "Windows" -Confirm:$false -Force
-
-    # Now the end of disk should have ~RecoverySizeMB free; create Recovery at end
-    Write-Log "Creating Recovery partition at END (${RecoverySizeMB}MB, NTFS)..."
-    $recovery = New-Partition -DiskNumber $DiskNumber -Size $recoveryBytes -GptType "{DE94BBA4-06D1-4D40-A16A-BFD50179D6AC}"
+    Log "Creating single NTFS partition and assigning drive letter"
+    $part = New-Partition -DiskNumber $DiskNumber -UseMaximumSize -AssignDriveLetter
+    # Force it to C:
     try {
-        Set-Partition -DiskNumber $DiskNumber -PartitionNumber $recovery.PartitionNumber -GptType "{DE94BBA4-06D1-4D40-A16A-BFD50179D6AC}"
-        # 0x8000000000000001 => GPT attributes: required + hidden (WinRE)
-        Set-Partition -DiskNumber $DiskNumber -PartitionNumber $recovery.PartitionNumber -Attributes 0x8000000000000001 -ErrorAction SilentlyContinue
+        # If C: exists, remove access path from that partition first
+        $cPart = Get-Partition -DriveLetter C -ErrorAction SilentlyContinue
+        if ($cPart) {
+            Remove-PartitionAccessPath -DiskNumber $cPart.DiskNumber -PartitionNumber $cPart.PartitionNumber -AccessPath "C:\" -ErrorAction SilentlyContinue
+        }
     } catch {}
-    Format-Volume -Partition $recovery -FileSystem NTFS -NewFileSystemLabel "Recovery" -Confirm:$false -Force
-
-    Write-Log "Partitioning complete:"
-    Get-Partition -DiskNumber $DiskNumber | Sort-Object Offset | ForEach-Object {
-        $sizeGB = "{0:N2}" -f ($_.Size/1GB)
-        Write-Host ("  - Part {0}: Type={1} Size={2} GB" -f $_.PartitionNumber, $_.GptType, $sizeGB)
-    }
-
-    Write-Log "Done. Log saved to: $script:LogPath"
-    Write-Host ""
-    Write-Host "Standing by for next steps..." -ForegroundColor Cyan
+    Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel "Windows" -Confirm:$false -Force
+    Set-Partition -DiskNumber $part.DiskNumber -PartitionNumber $part.PartitionNumber -NewDriveLetter C | Out-Null
+    Log "Disk prepared. C: ready."
 }
 
-# ----------------------------
-# Disk provisioning (DiskPart fallback)
-# ----------------------------
-function Provision-DiskWithDiskPart {
-    param(
-        [Parameter(Mandatory=$true)][int]$DiskNumber,
-        [int]$EfiSizeMB = 260,
-        [int]$MsrSizeMB = 16,
-        [int]$RecoverySizeMB = 1024
-    )
-
-    Write-Log "Storage module unavailable. Falling back to DiskPart..." "WARN"
-    $dp = @()
-    $dp += "select disk $DiskNumber"
-    $dp += "detail disk"
-    $dp += "online disk"
-    $dp += "attributes disk clear readonly"
-    $dp += "clean"
-    $dp += "convert gpt"
-
-    # EFI
-    $dp += "create partition efi size=$EfiSizeMB"
-    $dp += 'format fs=fat32 quick label="SYSTEM"'
-
-    # MSR
-    $dp += "create partition msr size=$MsrSizeMB"
-
-    # OS placeholder (takes the rest for now)
-    $dp += 'create partition primary'
-    $dp += 'format fs=ntfs quick label="Windows"'
-
-    # Shrink the last partition to leave space at END for Recovery
-    $dp += "shrink desired=$RecoverySizeMB minimum=$RecoverySizeMB"
-
-    # Recovery at end (WinRE attributes + label)
-    $dp += "create partition primary size=$RecoverySizeMB"
-    $dp += "set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac"
-    $dp += "gpt attributes=0x8000000000000001"
-    $dp += 'format fs=ntfs quick label="Recovery"'
-
-    $dptxt = Join-Path -Path (Get-TempRoot) -ChildPath 'bf_diskpart.txt'
-    $dp | Out-File -FilePath $dptxt -Encoding ascii -Force
-
-    Write-Log "Running DiskPart script..."
-    try {
-        diskpart /s $dptxt | ForEach-Object { Write-Host $_ }
-    } catch {
-        Write-Log ("DiskPart failed: {0}" -f $_.Exception.Message) "ERROR"
-        throw
+function Get-DeviceSkuName {
+    # Use SystemSKUNumber; fallback to BaseBoard.Product
+    $sku = ''
+    try { $sku = (Get-CimInstance Win32_ComputerSystem).SystemSKUNumber } catch {}
+    if ([string]::IsNullOrWhiteSpace($sku)) {
+        try { $sku = (Get-CimInstance Win32_BaseBoard).Product } catch {}
     }
-    Write-Log "DiskPart complete."
-    Write-Host ""
-    Write-Host "Standing by for next steps..." -ForegroundColor Cyan
+    if ([string]::IsNullOrWhiteSpace($sku)) { $sku = "UnknownSKU" }
+    # Clean for folder name
+    $invalid = [IO.Path]::GetInvalidFileNameChars() -join ''
+    $sku = ($sku -replace "[{0}]" -f [Regex]::Escape($invalid), '_')
+    return $sku
 }
 
-# ----------------------------
-# Main flow
-# ----------------------------
-try {
-    Write-Log "Scanning for suitable local disks..."
-    $candidates = Get-WritableDisks
-    if (-not $candidates -or $candidates.Count -eq 0) {
-        Get-HardwareReport
-        Write-Host ""
-        Write-Host "No writable internal disks found. Please report the above details to the technical team." -ForegroundColor Red
-        Start-Sleep -Seconds 15
-        exit 1
-    }
+function Extract-SoftPaq {
+    param([string]$ExePath, [string]$DestDir)
+    if (-not (Test-Path -LiteralPath $ExePath)) { throw "SoftPaq not found: $ExePath" }
+    if (-not (Test-Path -LiteralPath $DestDir)) { New-Item -ItemType Directory -Path $DestDir -Force | Out-Null }
 
-    # Choose the largest candidate
-    $target = $candidates | Select-Object -First 1
-    Write-Host "Found writable disk(s):" -ForegroundColor Green
-    foreach ($d in $candidates) {
-        $sz = [math]::Round($d.Size/1GB)
-        $name = Coalesce $d.FriendlyName 'Unnamed'
-        Write-Host ("  - Disk {0}: {1} GB ({2}) Bus={3}" -f $d.Number, $sz, $name, $d.BusType)
+    # Common HP SoftPaq silent extract: /e /s /f "<dir>"
+    Log "Extracting SoftPaq silently → $DestDir"
+    & "$ExePath" /e /s /f "$DestDir"
+    if ($LASTEXITCODE -ne 0) {
+        # Some SoftPaqs use -e -s -f
+        & "$ExePath" -e -s -f "$DestDir"
     }
-    Write-Host ""
-    Write-Host ("Selecting Disk {0} ({1} GB) for provisioning..." -f $target.Number, [math]::Round($target.Size/1GB)) -ForegroundColor Yellow
+    # Basic check: look for INF presence
+    $inf = Get-ChildItem -Path $DestDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $inf) { Log "Warning: No INF found yet—extraction may have nested folder, continuing." }
+}
 
-    # Decide path
-    if (Get-Command -Name Get-Disk -ErrorAction SilentlyContinue) {
-       Provision-DiskWithStorageCmdlets -DiskNumber $target.Number
+function Load-Drivers {
+    param([string]$Root)
+    $infFiles = Get-ChildItem -Path $Root -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+    if (-not $infFiles -or $infFiles.Count -eq 0) { throw "No .inf files found under $Root." }
+
+    $drvload = Get-Command drvload.exe -ErrorAction SilentlyContinue
+    if ($drvload) {
+        $ok=0;$fail=0
+        foreach ($inf in $infFiles) {
+            Log "drvload $inf"
+            & $drvload "$inf"
+            if ($LASTEXITCODE -eq 0) { $ok++ } else { $fail++ }
+        }
+        Log "drvload results: loaded=$ok, failed=$fail"
     } else {
-       Provision-DiskWithDiskPart -DiskNumber $target.Number
+        # Fallback: pnputil stage+install (best-effort)
+        $pnp = Get-Command pnputil.exe -ErrorAction SilentlyContinue
+        if (-not $pnp) { throw "Neither drvload nor pnputil is available to load drivers." }
+        Log "pnputil /add-driver ""$Root\*.inf"" /subdirs /install"
+        & $pnp /add-driver "$Root\*.inf" /subdirs /install
     }
+}
 
-    Write-Host ""
-    Write-Host "Finished baseline layout: SYSTEM (EFI), MSR, OS placeholder, Recovery at end." -ForegroundColor Green
-    Write-Host "Log: $script:LogPath" -ForegroundColor DarkGray
-    Write-Host "Waiting for the next steps script..." -ForegroundColor Cyan
-    Start-Sleep -Seconds 10
+function Rescan-Devices {
+    Log "Rescanning storage (diskpart)..."
+    $dp = Join-Path 'X:\' 'rescan.txt'
+    @("rescan","list disk","list volume") | Out-File -FilePath $dp -Encoding ascii -Force
+    try { diskpart /s $dp | Out-Null } catch { Log "diskpart rescan failed (continuing)" }
 
+    try { & wpeutil UpdateBootInfo | Out-Null } catch {}
+    $pnp = Get-Command pnputil.exe -ErrorAction SilentlyContinue
+    if ($pnp) { try { & $pnp /scan-devices | Out-Null } catch {} }
+}
+
+# ------------------ MAIN ------------------
+
+try {
+    Log "Locating internal (non-USB) target disk..."
+    $disk = Get-InternalTargetDisk
+    Log ("Selected Disk {0} ({1} GB) Bus={2}" -f $disk.Number, [math]::Round($disk.Size/1GB), $disk.BusType)
+
+    Prep-Disk-OnePartition -DiskNumber $disk.Number
+
+    $sku = Get-DeviceSkuName
+    $driversRoot = Join-Path 'C:\Drivers' $sku
+    if (-not (Test-Path -LiteralPath $driversRoot)) { New-Item -ItemType Directory -Path $driversRoot -Force | Out-Null }
+    Log "Drivers folder: $driversRoot"
+
+    $url = 'https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe'
+    $dlPath = Join-Path $driversRoot 'sp160195.exe'
+    Download-File -Url $url -DestPath $dlPath
+
+    $extractDir = Join-Path $driversRoot 'extracted'
+    Extract-SoftPaq -ExePath $dlPath -DestDir $extractDir
+
+    Load-Drivers -Root $extractDir
+    Rescan-Devices
+
+    Log "Done. C: formatted, drivers injected, devices rescanned."
+    Write-Host "Success. You can proceed with imaging or disk operations." -ForegroundColor Green
 } catch {
-    Write-Log ("Error: {0}" -f $_.Exception.Message) "ERROR"
-    Write-Host "Something went wrong: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "A log was saved to: $script:LogPath" -ForegroundColor DarkGray
-    Start-Sleep -Seconds 10
+    Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    exit 1
+}
     exit 2
 }
