@@ -288,6 +288,7 @@ try {
         Get-HardwareReport
         Write-Host ""
         Write-Host "No writable internal disks found. Please report the above details to the technical team." -ForegroundColor Red
+        Start-Sleep 60
         exit 1
     }
 
@@ -302,19 +303,25 @@ try {
 
     # Decide path
     if (Get-Command -Name Get-Disk -ErrorAction SilentlyContinue) {
-        Provision-DiskWithStorageCmdlets -DiskNumber $target.Number
+       # Provision-DiskWithStorageCmdlets -DiskNumber $target.Number
+       Write-host "We got to the format step"
+       Start-Sleep 60
     } else {
-        Provision-DiskWithDiskPart -DiskNumber $target.Number
+       # Provision-DiskWithDiskPart -DiskNumber $target.Number
+       Write-host "We ended up in diskpart"
+       Start-Sleep 60
     }
 
     Write-Host ""
     Write-Host "✅ Finished baseline layout: SYSTEM (EFI), MSR, OS placeholder, Recovery at end." -ForegroundColor Green
     Write-Host "📄 Log: $script:LogPath" -ForegroundColor DarkGray
     Write-Host "⏳ Waiting for the next steps script..." -ForegroundColor Cyan
+    Start-Sleep 60
 
 } catch {
     Write-Log ("Error: {0}" -f $_.Exception.Message) "ERROR"
     Write-Host "Something went wrong: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "A log was saved to: $script:LogPath" -ForegroundColor DarkGray
+    Start-Sleep 60
     exit 2
 }
