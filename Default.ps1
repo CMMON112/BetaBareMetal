@@ -100,7 +100,7 @@ function Download-File {
     Enable-Tls12
     for ($i=0; $i -le $Retries; $i++) {
         Log ("Downloading: {0} (attempt {1}/{2})" -f $Url, ($i+1), ($Retries+1))
-        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+        $curl = "X:\Windows\System32\curl.exe"
         try {
             if ($curl) {
                 & curl.exe --fail --location --silent --show-error -o "$DestPath" "$Url"
@@ -572,22 +572,6 @@ try {
     Prep-Disk-Win11Layout -DiskNumber $disk.Number
     Log "Done. C: formatted"
 
-    #$sku = Get-DeviceSkuName
-    #$driversRoot = Join-Path 'C:\Drivers' $sku
-    #if (-not (Test-Path -LiteralPath $driversRoot)) { New-Item -ItemType Directory -Path $driversRoot -Force | Out-Null }
-    #Log "Drivers folder: $driversRoot"
-
-    #$url = 'https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe'
-    #$dlPath = Join-Path $driversRoot 'sp160195.exe'
-    #Download-File -Url $url -DestPath $dlPath
-
-    #$extractDir = Join-Path $driversRoot 'extracted'
-    #Extract-SoftPaq -ExePath $dlPath -DestDir $extractDir
-
-    #Load-Drivers -Root $extractDir
-    #Rescan-Devices
-
-    #Log "Done. C: formatted, drivers injected, devices rescanned."
     Write-Host "Success. You can proceed with imaging or disk operations." -ForegroundColor Green
 } catch {
     Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
@@ -598,5 +582,21 @@ $matches = Get-OsCatalogEntry -OperatingSystem 'Windows 11' -ReleaseID '25H2' -A
 $matches | Format-List
 Write-Host "Success. Starting download" -ForegroundColor Green
 $OSESD = Save-OsFile -Url $matches.ESDUrl -Sha1Hash $matches.Sha1 -Sha256Hash $matches.Sha256 -Destination C:\BuildOSD
-Apply-OsImage -ImagePath $OSESD.Path -Name "Windows 11 Enterprise" -DestinationVolume -DestinationVolume "C:\"
+Expand-WindowsImage -ImagePath $OSESD.Path -Index 6 -ApplyPath "C:\"
+$sku = Get-DeviceSkuName
+    $driversRoot = Join-Path 'C:\Drivers' $sku
+    if (-not (Test-Path -LiteralPath $driversRoot)) { New-Item -ItemType Directory -Path $driversRoot -Force | Out-Null }
+    Log "Drivers folder: $driversRoot"
+
+    $url = 'https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe'
+    $dlPath = Join-Path $driversRoot 'sp160195.exe'
+    Download-File -Url $url -DestPath $dlPath
+
+    $extractDir = Join-Path $driversRoot 'extracted'
+    Extract-SoftPaq -ExePath $dlPath -DestDir $extractDir
+
+    Add-WindowsDriver -Path "C:\" -Driver $extractDir -Recurse
+
+    Log "Done. C: formatted, drivers injected."
+
 
