@@ -147,31 +147,60 @@ function Get-InternalTargetDisk {
     return ($preferred | Select-Object -First 1)
 }
 
-function Prep-Disk-OnePartition {
+function Prep-Disk-Win11Layout {
     param([Parameter(Mandatory=$true)][int]$DiskNumber)
 
-    Log "Clearing Disk $DiskNumber (this erases ALL data)"
+    Log "Preparing Disk $DiskNumber for Windows 11 (UEFI/GPT layout with Recovery at end)"
+
+    # Ensure disk is writable and online
     Set-Disk -Number $DiskNumber -IsReadOnly:$false -ErrorAction SilentlyContinue | Out-Null
     Set-Disk -Number $DiskNumber -IsOffline:$false -ErrorAction SilentlyContinue | Out-Null
 
+    Log "Clearing disk (ALL data will be erased)"
     Clear-Disk -Number $DiskNumber -RemoveData -Confirm:$false -RemoveOEM
     Initialize-Disk -Number $DiskNumber -PartitionStyle GPT
 
-    Log "Creating single NTFS partition and assigning drive letter"
-    $part = New-Partition -DiskNumber $DiskNumber -UseMaximumSize -AssignDriveLetter
+    Log "Creating Windows 11 standard partitions"
 
+    # 1. EFI System Partition (ESP) - 100 MB
+    $esp = New-Partition -DiskNumber $DiskNumber -Size 100MB `
+        -GptType "{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}"
+    Format-Volume -Partition $esp -FileSystem FAT32 -NewFileSystemLabel "System" -Confirm:$false -Force
+
+    # 2. Microsoft Reserved Partition (MSR) - 16 MB
+    New-Partition -DiskNumber $DiskNumber -Size 16MB `
+        -GptType "{E3C9E316-0B5C-4DB8-817D-F92DF00215AE}" | Out-Null
+
+    # 3. Windows partition (C:) - all space except last 750MB
+    $disk = Get-Disk -Number $DiskNumber
+    $usable = ($disk | Get-Disk).LargestFreeExtent
+    $windowsSize = $usable - 750MB
+
+    $windows = New-Partition -DiskNumber $DiskNumber -Size $windowsSize `
+        -GptType "{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}" -AssignDriveLetter
+
+    # Remove C: from any existing partition (WinRE quirk)
     try {
-        # If C: exists, remove access path from that partition first
         $cPart = Get-Partition -DriveLetter C -ErrorAction SilentlyContinue
         if ($cPart) {
-            Remove-PartitionAccessPath -DiskNumber $cPart.DiskNumber -PartitionNumber $cPart.PartitionNumber -AccessPath "C:\" -ErrorAction SilentlyContinue
+            Remove-PartitionAccessPath -DiskNumber $cPart.DiskNumber `
+                -PartitionNumber $cPart.PartitionNumber -AccessPath "C:\" `
+                -ErrorAction SilentlyContinue
         }
     } catch {}
 
-    Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel "Windows" -Confirm:$false -Force
-    Set-Partition -DiskNumber $part.DiskNumber -PartitionNumber $part.PartitionNumber -NewDriveLetter C | Out-Null
-    Log "Disk prepared. C: ready."
+    # Format Windows partition
+    Format-Volume -Partition $windows -FileSystem NTFS -NewFileSystemLabel "Windows" -Confirm:$false -Force
+    Set-Partition -DiskNumber $windows.DiskNumber -PartitionNumber $windows.PartitionNumber -NewDriveLetter C | Out-Null
+
+    # 4. Recovery partition (750 MB) - at end of disk
+    $recovery = New-Partition -DiskNumber $DiskNumber -UseMaximumSize `
+        -GptType "{DE94BBA4-06D1-4D40-A16A-BFD50179D6AC}"
+    Format-Volume -Partition $recovery -FileSystem NTFS -NewFileSystemLabel "Recovery" -Confirm:$false -Force
+
+    Log "Disk prepared with Windows 11 layout. C: ready and Recovery at end."
 }
+
 
 function Get-DeviceSkuName {
     # Use SystemSKUNumber; fallback to BaseBoard.Product
@@ -243,6 +272,264 @@ function Rescan-Devices {
         try { & pnputil.exe /scan-devices | Out-Null } catch {}
     }
 }
+function Get-OsCatalogEntry {
+    [CmdletBinding()]
+    param(
+        # Catalog URL (your provided source)
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string] $CatalogUri = 'https://raw.githubusercontent.com/OSDeploy/OSD/refs/heads/master/cache/os-catalogs/build-operatingsystems.xml',
+
+        # Constrained inputs as requested
+        [Parameter(Mandatory)]
+        [ValidateSet('Windows 11')]
+        [string] $OperatingSystem,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('24H2','25H2','26H2')]
+        [string] $ReleaseID,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('arm64','amd64')]
+        [string] $Architecture,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('en-us')]
+        [string] $LanguageCode,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('Volume')]
+        [string] $License
+    )
+
+    # --- WinPE networking hardening: enable TLS 1.2 for GitHub raw ---
+    try {
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch { }
+
+    # --- Helper: normalize Sha1 (Nil -> empty string) ---
+    function _Normalize-Sha1([object]$value) {
+        if ($null -eq $value) { return '' }
+        $s = [string]$value
+        if ([string]::IsNullOrWhiteSpace($s)) { return '' }
+        return $s
+    }
+
+    # --- Helper: safe version conversion for Build like "26200.7623" ---
+    function _To-Version([object]$build) {
+        $s = [string]$build
+        if ([string]::IsNullOrWhiteSpace($s)) {
+            return [version]'0.0'
+        }
+        try {
+            # System.Version supports "major.minor[.build[.revision]]" as integers
+            return [version]$s
+        } catch {
+            # Fallback: split on dot and pad/truncate
+            $parts = ($s -split '\.') | ForEach-Object { ($_ -as [int]) }
+            if ($parts.Count -lt 2) { $parts += 0 }
+            return New-Object System.Version ($parts[0]),($parts[1])
+        }
+    }
+
+    # --- Fetch and load catalog via Import-Clixml (PS 5.1 compatible) ---
+    $entries = $null
+    $tmp = $null
+    try {
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("os-catalog_{0}.xml" -f ([guid]::NewGuid().ToString()))
+        Invoke-WebRequest -Uri $CatalogUri -UseBasicParsing -OutFile $tmp -ErrorAction Stop
+        $entries = Import-Clixml -Path $tmp
+    } catch {
+        throw "Failed to load catalog from '$CatalogUri'. $_"
+    } finally {
+        if ($tmp -and (Test-Path $tmp)) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    if (-not $entries) {
+        throw "Catalog contained no entries."
+    }
+
+    # --- Filter: exact, case-insensitive matches ---
+    $filtered = $entries | Where-Object {
+        ($_.OperatingSystem -eq $OperatingSystem) -and
+        ($_.ReleaseId       -eq $ReleaseID) -and
+        ($_.Architecture    -eq $Architecture) -and
+        ($_.LanguageCode    -eq $LanguageCode) -and
+        ($_.License         -eq $License)
+    }
+
+    if (-not $filtered) {
+        # Nothing matched; return $null to make it easy to test
+        return $null
+    }
+
+    # --- If multiple, pick the latest by Build ---
+    $latest = $filtered |
+        Sort-Object -Descending -Property @{ Expression = { _To-Version $_.Build } } |
+        Select-Object -First 1
+
+    # --- Project to required fields ---
+    [pscustomobject]@{
+        ObjectUrl = $latest.Url
+        Sha1      = _Normalize-Sha1 $latest.Sha1
+        Sha256    = $latest.Sha256
+    }
+}
+function Save-OsFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Url,
+
+        [Parameter()]
+        [string] $Sha1Hash,
+
+        [Parameter()]
+        [string] $Sha256Hash,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Destination
+    )
+
+    # Enable TLS 1.2 (common requirement for modern endpoints)
+    try {
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch { }
+
+    # Normalize inputs: trim and remove accidental whitespace within URL
+    $Url = $Url.Trim()
+    $cleanUrl = ($Url -replace '\s','')
+
+    $Sha1Hash   = if ($Sha1Hash)   { ($Sha1Hash   -replace '\s','').ToLowerInvariant() } else { $null }
+    $Sha256Hash = if ($Sha256Hash) { ($Sha256Hash -replace '\s','').ToLowerInvariant() } else { $null }
+
+    # Ensure destination exists
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    }
+
+    # Target path from URL leaf
+    try {
+        $uri = [Uri]$cleanUrl
+        $fileName = [IO.Path]::GetFileName($uri.LocalPath)
+        if ([string]::IsNullOrWhiteSpace($fileName)) {
+            throw "Could not derive a filename from Url."
+        }
+        $targetPath = Join-Path -Path $Destination -ChildPath $fileName
+    } catch {
+        throw "Failed to determine target path from Url '$Url'. $_"
+    }
+
+    $downloaded = $false
+
+    # If file does not exist, download; otherwise skip download
+    if (-not (Test-Path -LiteralPath $targetPath)) {
+        try {
+            Invoke-WebRequest -Uri $cleanUrl -UseBasicParsing -OutFile $targetPath -ErrorAction Stop
+            $downloaded = $true
+        } catch {
+            throw "Download failed from '$cleanUrl' to '$targetPath'. $_"
+        }
+    }
+
+    # Hash only if requested
+    $actualSha1   = $null
+    $actualSha256 = $null
+
+    if ($Sha1Hash) {
+        $actualSha1 = (Get-FileHash -Algorithm SHA1 -Path $targetPath -ErrorAction Stop).Hash.ToLowerInvariant()
+        if ($actualSha1 -ne $Sha1Hash) {
+            throw "SHA1 mismatch for '$targetPath'. Expected: $Sha1Hash  Actual: $actualSha1"
+        }
+    }
+
+    if ($Sha256Hash) {
+        $actualSha256 = (Get-FileHash -Algorithm SHA256 -Path $targetPath -ErrorAction Stop).Hash.ToLowerInvariant()
+        if ($actualSha256 -ne $Sha256Hash) {
+            throw "SHA256 mismatch for '$targetPath'. Expected: $Sha256Hash  Actual: $actualSha256"
+        }
+    }
+
+    # Return concise result
+    $fi = Get-Item -LiteralPath $targetPath -ErrorAction SilentlyContinue
+    [pscustomobject]@{
+        Path           = $targetPath
+        Bytes          = if ($fi) { $fi.Length } else { $null }
+        Downloaded     = $downloaded
+        VerifiedSHA1   = if ($Sha1Hash)   { $actualSha1 }   else { '' }
+        VerifiedSHA256 = if ($Sha256Hash) { $actualSha256 } else { '' }
+        Verified       = @(
+                            -not $Sha1Hash   -or ($actualSha1   -eq $Sha1Hash)
+                            -not $Sha256Hash -or ($actualSha256 -eq $Sha256Hash)
+                          ) -notcontains $false
+    }
+}
+function Apply-OsImage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $ImagePath,
+
+        [Parameter(Mandatory)]
+        [string] $Name,
+
+        [Parameter(Mandatory)]
+        [string] $DestinationVolume
+    )
+
+    # Validate image exists
+    if (-not (Test-Path -LiteralPath $ImagePath)) {
+        throw "ImagePath not found: $ImagePath"
+    }
+
+    # Ensure destination exists
+    if (-not (Test-Path -LiteralPath $DestinationVolume)) {
+        New-Item -ItemType Directory -Path $DestinationVolume -Force | Out-Null
+    }
+
+    # Query available images
+    $images = Get-WindowsImage -ImagePath $ImagePath -ErrorAction Stop
+
+    if (-not $images) {
+        throw "No images found in: $ImagePath"
+    }
+
+    # Find matching image by name (case-insensitive)
+    $match = $images | Where-Object {
+        $_.ImageName -eq $Name -or
+        $_.ImageName.ToLower() -eq $Name.ToLower()
+    }
+
+    if (-not $match) {
+        $available = ($images.ImageName -join ', ')
+        throw "No image named '$Name'. Available images: $available"
+    }
+
+    # Pick the highest index if multiple entries match
+    $selected = $match | Sort-Object ImageIndex -Descending | Select-Object -First 1
+    $index = $selected.ImageIndex
+
+    Write-Host "Applying image index $index ($Name) to $DestinationVolume..."
+
+    # Apply using DISM's Expand-WindowsImage
+    Expand-WindowsImage `
+        -ImagePath $ImagePath `
+        -Index $index `
+        -ApplyPath $DestinationVolume `
+        -ErrorAction Stop
+
+    return [pscustomobject]@{
+        ImagePath         = $ImagePath
+        AppliedImageName  = $selected.ImageName
+        AppliedImageIndex = $index
+        Destination       = $DestinationVolume
+    }
+}
+
 
 # ------------------ MAIN ------------------
 
@@ -251,27 +538,33 @@ try {
     $disk = Get-InternalTargetDisk
     Log ("Selected Disk {0} ({1} GB) Bus={2}" -f $disk.Number, [math]::Round($disk.Size/1GB), $disk.BusType)
 
-    Prep-Disk-OnePartition -DiskNumber $disk.Number
+    Prep-Disk-Win11Layout -DiskNumber $disk.Number
+    Log "Done. C: formatted"
 
-    $sku = Get-DeviceSkuName
-    $driversRoot = Join-Path 'C:\Drivers' $sku
-    if (-not (Test-Path -LiteralPath $driversRoot)) { New-Item -ItemType Directory -Path $driversRoot -Force | Out-Null }
-    Log "Drivers folder: $driversRoot"
+    #$sku = Get-DeviceSkuName
+    #$driversRoot = Join-Path 'C:\Drivers' $sku
+    #if (-not (Test-Path -LiteralPath $driversRoot)) { New-Item -ItemType Directory -Path $driversRoot -Force | Out-Null }
+    #Log "Drivers folder: $driversRoot"
 
-    $url = 'https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe'
-    $dlPath = Join-Path $driversRoot 'sp160195.exe'
-    Download-File -Url $url -DestPath $dlPath
+    #$url = 'https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe'
+    #$dlPath = Join-Path $driversRoot 'sp160195.exe'
+    #Download-File -Url $url -DestPath $dlPath
 
-    $extractDir = Join-Path $driversRoot 'extracted'
-    Extract-SoftPaq -ExePath $dlPath -DestDir $extractDir
+    #$extractDir = Join-Path $driversRoot 'extracted'
+    #Extract-SoftPaq -ExePath $dlPath -DestDir $extractDir
 
-    Load-Drivers -Root $extractDir
-    Rescan-Devices
+    #Load-Drivers -Root $extractDir
+    #Rescan-Devices
 
-    Log "Done. C: formatted, drivers injected, devices rescanned."
+    #Log "Done. C: formatted, drivers injected, devices rescanned."
     Write-Host "Success. You can proceed with imaging or disk operations." -ForegroundColor Green
-    exit 0
 } catch {
     Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
     exit 1
 }
+Log "Looking for Windows image"
+$matches = Get-OsCatalogEntry -OperatingSystem 'Windows 11' -ReleaseID '25H2' -Architecture 'amd64' -LanguageCode 'en-us' -License 'Volume'
+Write-Host "Success. Starting download" -ForegroundColor Green
+$OSESD = Save-OsFile -Url $matches.ESDUrl -Sha1Hash $matches.Sha1 -Sha256Hash $matches.Sha256 -Destination C:\BuildOSD
+Apply-OsImage -ImagePath $OSESD.Path -Name "Windows 11 Enterprise" -DestinationVolume -DestinationVolume "C:\"
+
