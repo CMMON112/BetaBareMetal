@@ -371,7 +371,7 @@ function Get-OsCatalogEntry {
 
     # --- Project to required fields ---
     [pscustomobject]@{
-        ObjectUrl = $latest.Url
+        ESDUrl = $latest.Url
         Sha1      = _Normalize-Sha1 $latest.Sha1
         Sha256    = $latest.Sha256
     }
