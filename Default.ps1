@@ -217,46 +217,169 @@ function Get-DeviceSkuName {
 }
 
 function Extract-SoftPaq {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)][string]$ExePath,
-        [Parameter(Mandatory=$true)][string]$DestDir
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ExePath,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DestDir,
+
+        # Maximum seconds to wait for parent + descendants
+        [int]$TimeoutSec = 600,
+
+        # Additional child process names to monitor (case-insensitive)
+        [string[]]$ExtraChildNames = @()
     )
-    if (-not (Test-Path -LiteralPath $ExePath)) { throw "SoftPaq not found: $ExePath" }
-    if (-not (Test-Path -LiteralPath $DestDir)) { New-Item -ItemType Directory -Path $DestDir -Force | Out-Null }
 
-    Log "Extracting SoftPaq silently → $DestDir"
-    & "$ExePath" /e /s /f "$DestDir"
-    $exit1 = $LASTEXITCODE
-    if ($exit1 -ne 0) {
-        & "$ExePath" -e -s -f "$DestDir"
-    }
-    # Basic check: look for INF presence
-    $inf = Get-ChildItem -Path $DestDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $inf) { Log "Warning: No INF found yet—extraction may have nested folder, continuing." -Level 'WARN' }
-}
-
-function Load-Drivers {
-    param([Parameter(Mandatory=$true)][string]$Root)
-
-    $infFiles = Get-ChildItem -Path $Root -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-    $infFiles = @($infFiles)
-    if (-not $infFiles -or $infFiles.Count -eq 0) { throw "No .inf files found under $Root." }
-
-    $drvload = Get-Command drvload.exe -ErrorAction SilentlyContinue
-    if ($drvload) {
-        $ok = 0; $fail = 0
-        foreach ($inf in $infFiles) {
-            Log "drvload $inf"
-            & drvload.exe "$inf"
-            if ($LASTEXITCODE -eq 0) { $ok++ } else { $fail++ }
+    begin {
+        function Log {
+            param(
+                [Parameter(Mandatory=$true)][string]$Message,
+                [ValidateSet('INFO','WARN','ERROR')][string]$Level = 'INFO'
+            )
+            $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            Write-Host "[$ts][$Level] $Message"
         }
-        Log ("drvload results: loaded={0}, failed={1}" -f $ok, $fail)
-    } else {
-        $pnp = Get-Command pnputil.exe -ErrorAction SilentlyContinue
-        if (-not $pnp) { throw "Neither drvload nor pnputil is available to load drivers." }
-        Log "pnputil /add-driver ""$Root\*.inf"" /subdirs /install"
-        & pnputil.exe /add-driver "$Root\*.inf" /subdirs /install
-        # Note: pnputil exit codes vary; we log and continue.
+
+        function Get-DescendantProcesses {
+            param(
+                [Parameter(Mandatory=$true)][int]$RootPid
+            )
+            # Build a map of PID -> children to traverse the tree
+            $procs = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name
+            $byParent = $procs | Group-Object ParentProcessId -AsHashTable -AsString
+
+            $queue = New-Object System.Collections.Generic.Queue[int]
+            $desc  = New-Object System.Collections.Generic.List[object]
+            $queue.Enqueue($RootPid)
+
+            while ($queue.Count -gt 0) {
+                $pid = $queue.Dequeue()
+                $children = $byParent[[string]$pid]
+                if ($children) {
+                    foreach ($c in $children) {
+                        $desc.Add($c)
+                        $queue.Enqueue([int]$c.ProcessId)
+                    }
+                }
+            }
+
+            # Return current running descendants (they may have exited since snapshot; re-check live pids)
+            $livePids = Get-Process -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id
+            $desc | Where-Object { $livePids -contains $_.ProcessId }
+        }
+
+        # Normalize path / create destination
+        if (-not (Test-Path -LiteralPath $ExePath)) {
+            throw "SoftPaq not found: $ExePath"
+        }
+        if (-not (Test-Path -LiteralPath $DestDir)) {
+            $null = New-Item -ItemType Directory -Path $DestDir -Force
+        }
+
+        # Child process name patterns to watch (common with SFX / installers)
+        $global:ChildNameSet = @(
+            '7z.exe','7za.exe','7zip.exe',
+            'setup.exe','dpinst.exe','installshield*','isscript*','msiexec.exe',
+            'hpsilentinstall.exe','hp*.exe','sp*.exe' # SoftPaq-related binaries sometimes spawn others
+        ) + $ExtraChildNames
+    }
+
+    process {
+        # Helper to run and wait for tree to finish (parent + descendants)
+        function Invoke-And-Wait {
+            param(
+                [Parameter(Mandatory=$true)][string]$FilePath,
+                [Parameter(Mandatory=$true)][string[]]$Args,
+                [int]$Timeout = 600
+            )
+
+            Log "Launching: `"$FilePath`" $($Args -join ' ')" 'INFO'
+            $proc = Start-Process -FilePath $FilePath -ArgumentList $Args -PassThru -WindowStyle Hidden -ErrorAction Stop
+
+            $startTime   = Get-Date
+            $deadline    = $startTime.AddSeconds($Timeout)
+            $parentPid   = $proc.Id
+
+            # Wait for parent to exit first
+            try {
+                Wait-Process -Id $parentPid -Timeout ([Math]::Max(1, [int]([TimeSpan]::FromSeconds($Timeout).TotalSeconds))) -ErrorAction Stop
+            } catch {
+                Log "Parent process (PID $parentPid) exceeded timeout while running." 'WARN'
+            }
+
+            # Then continue while any descendant remains alive or any watched-name proc spawned in the tree remains
+            $sleepMs  = 250
+            $sleepMax = 1500
+
+            while ($true) {
+                # If timed out, break
+                if ((Get-Date) -ge $deadline) {
+                    Log "Timeout waiting for child processes of PID $parentPid" 'WARN'
+                    break
+                }
+
+                $desc = Get-DescendantProcesses -RootPid $parentPid
+
+                # Filter descendants by either being anything under the tree OR matching watched names (defensive)
+                $descLive = $desc
+                $watched  = @()
+                if ($descLive.Count -gt 0) {
+                    $watched = $descLive | Where-Object {
+                        $name = $_.Name
+                        foreach ($pattern in $global:ChildNameSet) {
+                            if ($name -like $pattern) { return $true }
+                        }
+                        return $false
+                    }
+                }
+
+                # If any descendants are still present, keep waiting
+                if ($descLive.Count -gt 0 -or $watched.Count -gt 0) {
+                    Start-Sleep -Milliseconds $sleepMs
+                    # backoff a bit up to max
+                    $sleepMs = [Math]::Min($sleepMs + 250, $sleepMax)
+                    continue
+                }
+
+                break
+            }
+
+            # Obtain the exit code of the initial process if available
+            $exitCode = $null
+            try {
+                $exitCode = $proc.ExitCode
+            } catch { }
+
+            return $exitCode
+        }
+
+        # Attempt 1: switches /e /s /f
+        $args1 = @('/e','/s','/f',"`"$DestDir`"")
+        $exit1 = Invoke-And-Wait -FilePath $ExePath -Args $args1 -Timeout $TimeoutSec
+
+        if ($exit1 -ne $null -and $exit1 -ne 0) {
+            Log "First attempt returned exit code $exit1. Retrying with alternate switch order." 'WARN'
+
+            # Attempt 2: switches -e -s -f
+            $args2 = @('-e','-s','-f',"`"$DestDir`"")
+            $exit2 = Invoke-And-Wait -FilePath $ExePath -Args $args2 -Timeout $TimeoutSec
+
+            if ($exit2 -ne $null -and $exit2 -ne 0) {
+                Log "Second attempt also returned exit code $exit2" 'WARN'
+            }
+        }
+
+        # Post-check: look for any .inf to hint that driver payload is present
+        $inf = Get-ChildItem -Path $DestDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $inf) {
+            Log "Warning: No INF found—extraction may have nested folders or non-driver payload. Check $DestDir." 'WARN'
+        } else {
+            Log "Extraction looks OK. Found INF: $($inf.FullName)" 'INFO'
+        }
     }
 }
 
