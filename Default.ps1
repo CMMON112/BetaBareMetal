@@ -645,6 +645,155 @@ function Initialize-UefiBootAfterApply {
         }
     }
 }
+
+function Install-OfflineDrivers {
+    <#
+    .SYNOPSIS
+        Injects drivers into an offline Windows image by enumerating *.inf files first.
+
+    .DESCRIPTION
+        - Finds all *.inf files with Get-ChildItem (not using -Recurse on Add-WindowsDriver).
+        - Reports how many are found.
+        - Iterates each INF into Add-WindowsDriver for clearer progress & error visibility.
+        - Supports -ForceUnsigned, -WhatIf, and -Verbose.
+        - Returns a summary object.
+
+    .PARAMETER ImagePath
+        Path to the offline Windows image (mount directory). Example: C:\Mount\WinImage
+
+    .PARAMETER DriverRoot
+        Root folder containing extracted drivers. Example: C:\Drivers\Extracted
+
+    .PARAMETER ForceUnsigned
+        Allow installation of unsigned drivers.
+
+    .EXAMPLE
+        Install-OfflineDrivers -ImagePath 'C:\Mount\WinImage' -DriverRoot 'C:\Drivers\Extracted' -Verbose
+
+    .EXAMPLE
+        Install-OfflineDrivers -ImagePath 'C:\Mount\WinImage' -DriverRoot 'C:\Drivers\Extracted' -ForceUnsigned -WhatIf
+
+    .NOTES
+        Requires elevated PowerShell and the DISM/WindowsImage PowerShell tooling (Add-WindowsDriver).
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ImagePath,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $DriverRoot,
+
+        [switch] $ForceUnsigned
+    )
+
+    Begin {
+        Write-Verbose "Validating paths and environment..."
+
+        if (-not (Test-Path -Path $ImagePath -PathType Container)) {
+            throw "ImagePath '$ImagePath' is not a valid folder (expected an offline mounted image directory)."
+        }
+        if (-not (Test-Path -Path $DriverRoot -PathType Container)) {
+            throw "DriverRoot '$DriverRoot' is not a valid folder."
+        }
+
+        if (-not (Get-Command Add-WindowsDriver -ErrorAction SilentlyContinue)) {
+            throw "Add-WindowsDriver cmdlet not found. Run in an elevated PowerShell with Windows ADK/Deployment tools or ensure the DISM PowerShell module is available."
+        }
+
+        Write-Verbose "Environment OK. ImagePath='$ImagePath'; DriverRoot='$DriverRoot'; ForceUnsigned=$($ForceUnsigned.IsPresent)"
+    }
+
+    Process {
+        Write-Host "Scanning for driver INF files under: $DriverRoot" -ForegroundColor Cyan
+
+        # Gather INF files once (instead of -Recurse with Add-WindowsDriver)
+        $driverInfs = Get-ChildItem -Path $DriverRoot -Filter *.inf -File -Recurse -ErrorAction SilentlyContinue
+        $driverCount = $driverInfs.Count
+
+        Write-Host "Found $driverCount driver INF file(s)." -ForegroundColor Cyan
+
+        if ($driverCount -eq 0) {
+            Write-Warning "No INF files found. Nothing to do."
+            # Return an empty summary object for consistency
+            return [pscustomobject]@{
+                ImagePath    = $ImagePath
+                DriverRoot   = $DriverRoot
+                DriversFound = 0
+                Succeeded    = 0
+                Failed       = 0
+                Timestamp    = (Get-Date)
+            }
+        }
+
+        $success   = 0
+        $failed    = 0
+        $processed = 0
+
+        # For progress bar tracking
+        $activity = "Installing drivers into offline image: $ImagePath"
+        $index    = 0
+
+        foreach ($inf in $driverInfs) {
+            $index++
+            $status = "[{0}/{1}] {2}" -f $index, $driverCount, $inf.Name
+            Write-Progress -Activity $activity -Status $status -PercentComplete ([int](($index / $driverCount) * 100))
+
+            $msg = "Injecting driver: $($inf.FullName)"
+            Write-Verbose $msg
+            Write-Host ("[{0}/{1}] {2}" -f $index, $driverCount, $inf.FullName) -ForegroundColor Yellow
+
+            # Build parameters for Add-WindowsDriver
+            $params = @{
+                Path        = $ImagePath
+                Driver      = $inf.FullName
+                ErrorAction = 'Stop'
+            }
+            if ($ForceUnsigned.IsPresent) { $params['ForceUnsigned'] = $true }
+
+            try {
+                if ($PSCmdlet.ShouldProcess($inf.FullName, "Add-WindowsDriver to '$ImagePath'")) {
+                    # Emit native output for good console visibility
+                    Add-WindowsDriver @params | Out-Host
+                }
+
+                Write-Host "   ✔ Success" -ForegroundColor Green
+                $success++
+            }
+            catch {
+                Write-Warning ("   ✖ Failed: {0}" -f $_.Exception.Message)
+                $failed++
+            }
+            finally {
+                $processed++
+            }
+        }
+
+        Write-Progress -Activity $activity -Completed -Status "Done"
+
+        # Summary to console
+        Write-Host ""
+        Write-Host "Completed." -ForegroundColor Cyan
+        Write-Host ("Drivers processed : {0}" -f $processed)
+        Write-Host ("Succeeded         : {0}" -f $success) -ForegroundColor Green
+        if ($failed -gt 0) {
+            Write-Host ("Failed            : {0}" -f $failed) -ForegroundColor Red
+        }
+
+        # Return a summary object (useful for pipelines/reporting)
+        [pscustomobject]@{
+            ImagePath    = $ImagePath
+            DriverRoot   = $DriverRoot
+            DriversFound = $driverCount
+            Succeeded    = $success
+            Failed       = $failed
+            Timestamp    = (Get-Date)
+        }
+    }
+}
+
 # ------------------ MAIN ------------------
 
 try {
@@ -678,7 +827,7 @@ $sku = Get-DeviceSkuName
     $extractDir = Join-Path $driversRoot 'extracted'
     Extract-SoftPaq -ExePath $dlPath -DestDir $extractDir
 
-    Add-WindowsDriver -Path "C:\" -Driver $extractDir -Recurse
+Install-OfflineDrivers -ImagePath "C:\" -DriverRoot $extractDir
 Initialize-UefiBootAfterApply -WindowsPath C:\Windows
     Log "Done. C: formatted, drivers injected."
 
