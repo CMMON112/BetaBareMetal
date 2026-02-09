@@ -564,6 +564,7 @@ try {
 }
 Log "Looking for Windows image"
 $matches = Get-OsCatalogEntry -OperatingSystem 'Windows 11' -ReleaseID '25H2' -Architecture 'amd64' -LanguageCode 'en-us' -License 'Volume'
+$matches | Format-List
 Write-Host "Success. Starting download" -ForegroundColor Green
 $OSESD = Save-OsFile -Url $matches.ESDUrl -Sha1Hash $matches.Sha1 -Sha256Hash $matches.Sha256 -Destination C:\BuildOSD
 Apply-OsImage -ImagePath $OSESD.Path -Name "Windows 11 Enterprise" -DestinationVolume -DestinationVolume "C:\"
