@@ -428,11 +428,42 @@ function Save-OsFile {
 
     # If file does not exist, download; otherwise skip download
     if (-not (Test-Path -LiteralPath $targetPath)) {
-        try {
-            Invoke-WebRequest -Uri $cleanUrl -UseBasicParsing -OutFile $targetPath -ErrorAction Stop
-            $downloaded = $true
-        } catch {
-            throw "Download failed from '$cleanUrl' to '$targetPath'. $_"
+        # Prefer curl.exe for performance if available; fallback to Invoke-WebRequest
+        $curlPath = Join-Path $env:WINDIR 'System32\curl.exe'
+        if (Test-Path -LiteralPath $curlPath) {
+            # Build curl arguments safely; handle spaces in paths and URL
+            $curlArgs = @(
+                '--fail'               # return non-zero on HTTP errors
+                '--location'           # follow redirects
+                '--silent'             # no progress
+                '--show-error'         # but still print errors
+                '--connect-timeout', '30'
+                '--output', $targetPath
+                $cleanUrl
+            )
+
+            try {
+                # Invoke curl and capture stderr/stdout
+                $null = & $curlPath @curlArgs 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) {
+                    # Clean up incomplete file if curl failed and left a stub
+                    if (Test-Path -LiteralPath $targetPath) {
+                        try { Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue } catch { }
+                    }
+                    throw "curl.exe download failed with exit code $LASTEXITCODE for '$cleanUrl' -> '$targetPath'."
+                }
+                $downloaded = $true
+            } catch {
+                throw "Download failed from '$cleanUrl' to '$targetPath' via curl.exe. $_"
+            }
+        }
+        else {
+            try {
+                Invoke-WebRequest -Uri $cleanUrl -UseBasicParsing -OutFile $targetPath -ErrorAction Stop
+                $downloaded = $true
+            } catch {
+                throw "Download failed from '$cleanUrl' to '$targetPath'. $_"
+            }
         }
     }
 
