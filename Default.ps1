@@ -561,7 +561,90 @@ function Apply-OsImage {
     }
 }
 
+# Run in WinPE (Admin)
+function Initialize-UefiBootAfterApply {
+    [CmdletBinding()]
+    param(
+        # The Windows you just applied with Expand-WindowsImage
+        [Parameter(Mandatory)]
+        [ValidateScript({ Test-Path $_ -PathType Container })]
+        [string] $WindowsPath,
 
+        # Preferred letter for temporary mount of ESP (if free)
+        [string] $PreferredEspLetter = 'S',
+
+        # Pass-through extra bcdboot args if needed (e.g., "/l en-US")
+        [string] $BcdBootExtraArgs
+    )
+
+    # Normalize Windows path
+    $win = (Resolve-Path -LiteralPath $WindowsPath).Path.TrimEnd('\')
+    if (-not (Test-Path -LiteralPath (Join-Path $win 'System32'))) {
+        throw "WindowsPath '$WindowsPath' doesn't look like a valid Windows directory."
+    }
+
+    # Ensure bcdboot exists in WinPE
+    $bcdboot = Join-Path $env:SystemRoot 'System32\bcdboot.exe'
+    if (-not (Test-Path -LiteralPath $bcdboot)) {
+        throw "bcdboot.exe not found at '$bcdboot'. Ensure you're in WinPE/Windows with bcdboot available."
+    }
+
+    # Find the EFI System Partition (ESP) by GPT type
+    $esp = Get-Partition -ErrorAction Stop |
+           Where-Object { $_.GptType -eq '{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}' } |
+           Sort-Object -Property Size -Descending |
+           Select-Object -First 1
+
+    if (-not $esp) {
+        throw "EFI System Partition (ESP) not found. Create and format it (FAT32) before running this."
+    }
+
+    # If the ESP has a letter, reuse; else temporarily assign one
+    $existingLetter = ($esp | Get-Volume -ErrorAction SilentlyContinue).DriveLetter
+    $tempLetter = $null
+    $espRoot = $null
+
+    try {
+        if ($existingLetter) {
+            $espRoot = "$existingLetter`:"
+        } else {
+            $used = (Get-Volume -ErrorAction SilentlyContinue).DriveLetter | Where-Object { $_ } | ForEach-Object { $_.ToUpper() }
+            $letter = if ($used -notcontains $PreferredEspLetter.ToUpper()) { $PreferredEspLetter.ToUpper() }
+                      else { (65..90 | ForEach-Object { [char]$_ } | Where-Object { $used -notcontains $_ })[0] }
+            if (-not $letter) { throw "No free drive letter available to mount ESP." }
+
+            $esp | Set-Partition -NewDriveLetter $letter -ErrorAction Stop
+            $tempLetter = $letter
+            $espRoot = "$letter`:"
+        }
+
+        Write-Host "Using ESP at $espRoot" -ForegroundColor Cyan
+
+        # Build bcdboot args (UEFI only)
+        $args = @("$win", '/f', 'UEFI', '/s', $espRoot)
+        if ($BcdBootExtraArgs) { $args += $BcdBootExtraArgs }
+
+        Write-Host "Running: bcdboot $($args -join ' ')" -ForegroundColor Yellow
+        & $bcdboot @args
+        if ($LASTEXITCODE -ne 0) {
+            throw "bcdboot failed (UEFI) with exit code $LASTEXITCODE."
+        }
+
+        # Quick sanity: confirm the expected path exists on ESP
+        $efiBoot = Join-Path $espRoot 'EFI\Microsoft\Boot\bootmgfw.efi'
+        if (-not (Test-Path -LiteralPath $efiBoot)) {
+            throw "Boot files not found at '$efiBoot' after bcdboot. Check ESP format and try again."
+        }
+
+        Write-Host "UEFI boot initialized successfully." -ForegroundColor Green
+    }
+    finally {
+        # Remove temporary letter if we added it
+        if ($tempLetter) {
+            try { $esp | Remove-PartitionAccessPath -AccessPath "$tempLetter`:" -ErrorAction SilentlyContinue } catch { }
+        }
+    }
+}
 # ------------------ MAIN ------------------
 
 try {
@@ -596,7 +679,7 @@ $sku = Get-DeviceSkuName
     Extract-SoftPaq -ExePath $dlPath -DestDir $extractDir
 
     Add-WindowsDriver -Path "C:\" -Driver $extractDir -Recurse
-
+Initialize-UefiBootAfterApply -WindowsPath C:\Windows
     Log "Done. C: formatted, drivers injected."
 
 
