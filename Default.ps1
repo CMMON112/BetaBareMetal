@@ -66,17 +66,27 @@ function Write-Log {
 }
 
 function Write-Status {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string] $Message,
-        [ValidateSet('INFO','STEP','WARN','ERROR','SUCCESS')][string] $Level = 'INFO'
+        [Parameter(Mandatory)]
+        [string] $Message,
+
+        [ValidateSet('INFO','STEP','WARN','ERROR','SUCCESS')]
+        [string] $Level = 'INFO',
+
+        [switch] $NoColor
     )
+
+    # ASCII-only, fixed-width tags
     $prefix = switch ($Level) {
-        'STEP'    { '▶' }
-        'INFO'    { '•' }
-        'WARN'    { '!' }
-        'ERROR'   { '✖' }
-        'SUCCESS' { '✔' }
+        'STEP'    { '[STEP]   ' }
+        'INFO'    { '[INFO]   ' }
+        'WARN'    { '[WARN]   ' }
+        'ERROR'   { '[ERROR]  ' }
+        'SUCCESS' { '[SUCCESS]' }
     }
+
+    # Console colors (not emojis); ignored when -NoColor is used
     $color = switch ($Level) {
         'STEP'    { 'Magenta' }
         'INFO'    { 'Gray' }
@@ -84,9 +94,19 @@ function Write-Status {
         'ERROR'   { 'Red' }
         'SUCCESS' { 'Green' }
     }
-    Write-Host ("{0} {1}" -f $prefix, $Message) -ForegroundColor $color
+
+    $text = "{0} {1}" -f $prefix, $Message
+
+    if ($NoColor) {
+        Write-Host $text
+    } else {
+        Write-Host $text -ForegroundColor $color
+    }
+
+    # Preserve your logging call
     Write-Log -Message $Message -Level $Level
 }
+
 
 function Show-Banner {
 @"
