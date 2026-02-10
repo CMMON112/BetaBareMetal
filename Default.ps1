@@ -230,7 +230,7 @@ function Extract-SoftPaq {
         # Maximum seconds to wait for parent + descendants
         [int]$TimeoutSec = 600,
 
-        # Additional child process names to monitor (case-insensitive)
+        # Additional child process names to monitor (case-insensitive; wildcards supported)
         [string[]]$ExtraChildNames = @()
     )
 
@@ -279,13 +279,13 @@ function Extract-SoftPaq {
             $null = New-Item -ItemType Directory -Path $DestDir -Force
         }
 
-        # Names commonly spawned by SoftPaq extractors (extend as needed)
+        # Ensure patterns are strings and support wildcards; case-insensitive matching later via -ilike
         $script:ChildNameSet = @(
             '7z.exe','7za.exe','7zip.exe',
             'setup.exe','dpinst.exe','msiexec.exe',
             'installshield*','isscript*',
             'hpsilentinstall.exe','hp*.exe','sp*.exe'
-        ) + $ExtraChildNames
+        ) + ($ExtraChildNames | ForEach-Object { [string]$_ })
     }
 
     process {
@@ -304,7 +304,7 @@ function Extract-SoftPaq {
 
             # 1) Wait for parent to exit (bounded by timeout)
             try {
-                $remaining = [int][Math]::Max(1, ($deadline - (Get-Date)).TotalSeconds)
+                $remaining = [int][math]::Max(1, ($deadline - (Get-Date)).TotalSeconds)
                 Wait-Process -Id $parentPid -Timeout $remaining -ErrorAction Stop
             } catch {
                 Log "Parent process (PID $parentPid) exceeded timeout while running." 'WARN'
@@ -322,21 +322,22 @@ function Extract-SoftPaq {
 
                 $desc = Get-DescendantProcesses -RootPid $parentPid
 
-                # Optionally focus on “watched names” (defensive)
+                # Filter descendants by watched names (case-insensitive, wildcard-aware)
                 $watched = @()
                 if ($desc.Count -gt 0) {
                     $watched = $desc | Where-Object {
-                        $n = $_.Name
+                        $n = [string]$_.Name
                         foreach ($pattern in $script:ChildNameSet) {
-                            if ($n -like $pattern) { return $true }
+                            if ($n -ilike ([string]$pattern)) { return $true }
                         }
-                        return $false
+                        $false
                     }
                 }
 
+                # If any descendants exist at all, or any match our watched list, keep waiting
                 if ($desc.Count -gt 0 -or $watched.Count -gt 0) {
                     Start-Sleep -Milliseconds $sleepMs
-                    $sleepMs = [Math]::Min($sleepMs + 250, $sleepMax)
+                    $sleepMs = [int][math]::Min($sleepMs + 250, $sleepMax)
                     continue
                 }
 
@@ -366,7 +367,7 @@ function Extract-SoftPaq {
         }
 
         # Give disk a brief moment to flush; some extractors finish processes
-        # slightly before all files are visible to the shell.
+        # slightly before all files are visible.
         $finalWaitMs = 0
         while ($finalWaitMs -lt 3000) {
             if (Test-Path -LiteralPath $DestDir) {
@@ -954,7 +955,9 @@ $sku = Get-DeviceSkuName
     $extractDir = Join-Path $driversRoot 'extracted'
     Extract-SoftPaq -ExePath $dlPath -DestDir $extractDir
 
+Write-host "Injecting offline Drivers"
 Install-OfflineDrivers -ImagePath "C:\" -DriverRoot $extractDir
+Write-host "fixing boot mgr and enabling boot"
 Initialize-UefiBootAfterApply -WindowsPath C:\Windows
     Log "Done. C: formatted, drivers injected."
 
