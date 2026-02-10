@@ -248,17 +248,17 @@ function Extract-SoftPaq {
             param(
                 [Parameter(Mandatory=$true)][int]$RootPid
             )
-            # Build a map of PID -> children to traverse the tree
+            # Snapshot process tree via CIM
             $procs = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name
             $byParent = $procs | Group-Object ParentProcessId -AsHashTable -AsString
 
-            $queue = New-Object System.Collections.Generic.Queue[int]
-            $desc  = New-Object System.Collections.Generic.List[object]
+            $queue = [System.Collections.Generic.Queue[int]]::new()
+            $desc  = [System.Collections.Generic.List[object]]::new()
             $queue.Enqueue($RootPid)
 
             while ($queue.Count -gt 0) {
-                $pid = $queue.Dequeue()
-                $children = $byParent[[string]$pid]
+                $currPid = $queue.Dequeue()
+                $children = $byParent[[string]$currPid]
                 if ($children) {
                     foreach ($c in $children) {
                         $desc.Add($c)
@@ -267,12 +267,11 @@ function Extract-SoftPaq {
                 }
             }
 
-            # Return current running descendants (they may have exited since snapshot; re-check live pids)
-            $livePids = Get-Process -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id
+            # Keep only currently running descendants
+            $livePids = (Get-Process -ErrorAction SilentlyContinue).Id
             $desc | Where-Object { $livePids -contains $_.ProcessId }
         }
 
-        # Normalize path / create destination
         if (-not (Test-Path -LiteralPath $ExePath)) {
             throw "SoftPaq not found: $ExePath"
         }
@@ -280,16 +279,16 @@ function Extract-SoftPaq {
             $null = New-Item -ItemType Directory -Path $DestDir -Force
         }
 
-        # Child process name patterns to watch (common with SFX / installers)
-        $global:ChildNameSet = @(
+        # Names commonly spawned by SoftPaq extractors (extend as needed)
+        $script:ChildNameSet = @(
             '7z.exe','7za.exe','7zip.exe',
-            'setup.exe','dpinst.exe','installshield*','isscript*','msiexec.exe',
-            'hpsilentinstall.exe','hp*.exe','sp*.exe' # SoftPaq-related binaries sometimes spawn others
+            'setup.exe','dpinst.exe','msiexec.exe',
+            'installshield*','isscript*',
+            'hpsilentinstall.exe','hp*.exe','sp*.exe'
         ) + $ExtraChildNames
     }
 
     process {
-        # Helper to run and wait for tree to finish (parent + descendants)
         function Invoke-And-Wait {
             param(
                 [Parameter(Mandatory=$true)][string]$FilePath,
@@ -300,23 +299,22 @@ function Extract-SoftPaq {
             Log "Launching: `"$FilePath`" $($Args -join ' ')" 'INFO'
             $proc = Start-Process -FilePath $FilePath -ArgumentList $Args -PassThru -WindowStyle Hidden -ErrorAction Stop
 
-            $startTime   = Get-Date
-            $deadline    = $startTime.AddSeconds($Timeout)
-            $parentPid   = $proc.Id
+            $deadline  = (Get-Date).AddSeconds($Timeout)
+            $parentPid = $proc.Id
 
-            # Wait for parent to exit first
+            # 1) Wait for parent to exit (bounded by timeout)
             try {
-                Wait-Process -Id $parentPid -Timeout ([Math]::Max(1, [int]([TimeSpan]::FromSeconds($Timeout).TotalSeconds))) -ErrorAction Stop
+                $remaining = [int][Math]::Max(1, ($deadline - (Get-Date)).TotalSeconds)
+                Wait-Process -Id $parentPid -Timeout $remaining -ErrorAction Stop
             } catch {
                 Log "Parent process (PID $parentPid) exceeded timeout while running." 'WARN'
             }
 
-            # Then continue while any descendant remains alive or any watched-name proc spawned in the tree remains
+            # 2) Then wait for descendants to finish
             $sleepMs  = 250
             $sleepMax = 1500
 
             while ($true) {
-                # If timed out, break
                 if ((Get-Date) -ge $deadline) {
                     Log "Timeout waiting for child processes of PID $parentPid" 'WARN'
                     break
@@ -324,23 +322,20 @@ function Extract-SoftPaq {
 
                 $desc = Get-DescendantProcesses -RootPid $parentPid
 
-                # Filter descendants by either being anything under the tree OR matching watched names (defensive)
-                $descLive = $desc
-                $watched  = @()
-                if ($descLive.Count -gt 0) {
-                    $watched = $descLive | Where-Object {
-                        $name = $_.Name
-                        foreach ($pattern in $global:ChildNameSet) {
-                            if ($name -like $pattern) { return $true }
+                # Optionally focus on “watched names” (defensive)
+                $watched = @()
+                if ($desc.Count -gt 0) {
+                    $watched = $desc | Where-Object {
+                        $n = $_.Name
+                        foreach ($pattern in $script:ChildNameSet) {
+                            if ($n -like $pattern) { return $true }
                         }
                         return $false
                     }
                 }
 
-                # If any descendants are still present, keep waiting
-                if ($descLive.Count -gt 0 -or $watched.Count -gt 0) {
+                if ($desc.Count -gt 0 -or $watched.Count -gt 0) {
                     Start-Sleep -Milliseconds $sleepMs
-                    # backoff a bit up to max
                     $sleepMs = [Math]::Min($sleepMs + 250, $sleepMax)
                     continue
                 }
@@ -348,23 +343,20 @@ function Extract-SoftPaq {
                 break
             }
 
-            # Obtain the exit code of the initial process if available
+            # Return exit code if available
             $exitCode = $null
-            try {
-                $exitCode = $proc.ExitCode
-            } catch { }
-
+            try { $exitCode = $proc.ExitCode } catch { }
             return $exitCode
         }
 
-        # Attempt 1: switches /e /s /f
+        # Attempt 1: classic SoftPaq switches
         $args1 = @('/e','/s','/f',"`"$DestDir`"")
         $exit1 = Invoke-And-Wait -FilePath $ExePath -Args $args1 -Timeout $TimeoutSec
 
         if ($exit1 -ne $null -and $exit1 -ne 0) {
             Log "First attempt returned exit code $exit1. Retrying with alternate switch order." 'WARN'
 
-            # Attempt 2: switches -e -s -f
+            # Attempt 2: alternate dash form
             $args2 = @('-e','-s','-f',"`"$DestDir`"")
             $exit2 = Invoke-And-Wait -FilePath $ExePath -Args $args2 -Timeout $TimeoutSec
 
@@ -373,10 +365,22 @@ function Extract-SoftPaq {
             }
         }
 
+        # Give disk a brief moment to flush; some extractors finish processes
+        # slightly before all files are visible to the shell.
+        $finalWaitMs = 0
+        while ($finalWaitMs -lt 3000) {
+            if (Test-Path -LiteralPath $DestDir) {
+                $items = Get-ChildItem -LiteralPath $DestDir -Recurse -ErrorAction SilentlyContinue
+                if ($items) { break }
+            }
+            Start-Sleep -Milliseconds 200
+            $finalWaitMs += 200
+        }
+
         # Post-check: look for any .inf to hint that driver payload is present
         $inf = Get-ChildItem -Path $DestDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $inf) {
-            Log "Warning: No INF found—extraction may have nested folders or non-driver payload. Check $DestDir." 'WARN'
+            Log "Warning: No INF found—extraction may have nested folders or a non-driver payload. Check $DestDir." 'WARN'
         } else {
             Log "Extraction looks OK. Found INF: $($inf.FullName)" 'INFO'
         }
