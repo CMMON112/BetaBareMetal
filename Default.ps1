@@ -151,7 +151,9 @@ function Write-Divider {
 
 function Show-Banner {
     Clear-Host
-    $banner = @("
+
+    # Use a here-string for multi-line ASCII text
+    $banner = @"
             ███╗   ███╗ ██████╗ ███╗   ██╗ █████╗ ███████╗██╗  ██╗                
             ████╗ ████║██╔═══██╗████╗  ██║██╔══██╗██╔════╝██║  ██║                
             ██╔████╔██║██║   ██║██╔██╗ ██║███████║███████╗███████║                
@@ -165,12 +167,14 @@ function Show-Banner {
 ██╔══██╗██║   ██║██║██║     ██║  ██║    ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  
 ██████╔╝╚██████╔╝██║███████╗██████╔╝    ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗
 ╚═════╝  ╚═════╝ ╚═╝╚══════╝╚═════╝     ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
-                                                                                  
-    ")
-    foreach ($line in $banner) {
-        Write-Host $line -ForegroundColor Cyan
+"@
+
+    # Split into lines and output with color
+    $banner -split "`r?`n" | ForEach-Object {
+        Write-Host $_ -ForegroundColor Cyan
     }
 }
+
 
 function Show-CompletionSummary {
     param([System.Collections.IDictionary] $Results)
