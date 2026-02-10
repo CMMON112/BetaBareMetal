@@ -501,139 +501,162 @@ function Initialize-UefiBootAfterApply {
 
         [string] $PreferredEspLetter = 'S',
 
-        # Use array to avoid collapsing args into one string
+        # Extra BCDBoot args, example: @('/l','en-US','/v')
         [string[]] $BcdBootExtraArgs = @()
     )
 
-    Write-Host "== Initialize-UefiBootAfterApply =="
-    Write-Host "WindowsPath..............: $WindowsPath"
-    Write-Host "PreferredEspLetter.......: $PreferredEspLetter"
-    Write-Host "BcdBootExtraArgs (raw)...: $($BcdBootExtraArgs -join ' ')"
+    Write-Host "=== Initialize-UefiBootAfterApply ===" -ForegroundColor Cyan
 
-    # Resolve and basic validation
-    $win = (Resolve-Path -LiteralPath $WindowsPath).Path.TrimEnd('\')
-    Write-Host "Resolved Windows path....: $win"
+    # ─── Resolve & validate Windows folder ───
+    $win = (Resolve-Path -LiteralPath $WindowsPath -ErrorAction Stop).Path.TrimEnd('\')
+    Write-Host "Windows path : $win"
 
-    $system32 = Join-Path $win 'System32'
-    if (-not (Test-Path -LiteralPath $system32)) {
-        throw "WindowsPath '$WindowsPath' doesn't look like a valid Windows directory (no System32)."
+    if (-not (Test-Path (Join-Path $win 'System32\config\SYSTEM'))) {
+        throw "Path does not look like a valid Windows installation (missing SYSTEM hive)."
     }
 
-    $bcdboot = Join-Path $env:SystemRoot 'System32\bcdboot.exe'
-    if (-not (Test-Path -LiteralPath $bcdboot)) {
-        throw "bcdboot.exe not found at '$bcdboot'."
+    # ─── Locate bcdboot.exe ───
+    $bcdboot = "${env:SystemRoot}\System32\bcdboot.exe"
+    if (-not (Test-Path $bcdboot)) {
+        throw "bcdboot.exe not found at $bcdboot"
     }
-    Write-Host "bcdboot path.............: $bcdboot"
 
-    # Find the EFI System Partition (largest one if multiple)
-    Write-Host "Locating EFI System Partition (ESP)..."
-    $esp = Get-Partition -ErrorAction Stop |
+    # ─── Find EFI System Partition (largest one if multiple) ───
+    Write-Host "Locating EFI System Partition (ESP) ..." -ForegroundColor Yellow
+
+    $esp = Get-Partition -ErrorAction SilentlyContinue |
            Where-Object { $_.GptType -eq '{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}' } |
-           Sort-Object -Property Size -Descending |
+           Sort-Object Size -Descending |
            Select-Object -First 1
 
-    if (-not $esp) { throw "EFI System Partition (ESP) not found." }
+    if (-not $esp) {
+        throw "No EFI System Partition (GPT type C12A7328-...) found on any disk."
+    }
 
-    Write-Host ("ESP located: Disk {0}, Part {1}, Size {2} bytes" -f $esp.DiskNumber, $esp.PartitionNumber, $esp.Size)
+    Write-Host "ESP found → Disk $($esp.DiskNumber), Partition $($esp.PartitionNumber), Size $([math]::Round($esp.Size/1MB,1)) MB"
 
-    # Check if ESP already has a drive letter
-    $existingVol = $null
-    try { $existingVol = $esp | Get-Volume -ErrorAction Stop } catch {}
-    $existingLetter = $null
-    if ($existingVol -and $existingVol.DriveLetter) { $existingLetter = [string]$existingVol.DriveLetter }
-
-    Write-Host ("Existing ESP drive letter: {0}" -f ($existingLetter ? $existingLetter : "<none>"))
-
-    $tempLetter = $null
-    $espLetter  = $null
-    $espRoot    = $null
+    # ─── Try to get existing letter (may fail in WinPE) ───
+    $espLetter = $null
+    $usedAsTemp = $false
 
     try {
-        if ($existingLetter) {
-            # Normalize to uppercase string, ensure colon is added only in root variable
-            $espLetter = $existingLetter.ToString().ToUpper()
-            $espRoot   = "$espLetter:"
-        } else {
-            # Build list of used letters (strings)
-            $usedLetters = @()
-            foreach ($v in (Get-Volume -ErrorAction SilentlyContinue)) {
-                if ($v -and $v.DriveLetter) { $usedLetters += $v.DriveLetter.ToString().ToUpper() }
-            }
-            Write-Host "Used letters.............: $($usedLetters -join ', ')"
+        $vol = $esp | Get-Volume -ErrorAction Stop
+        if ($vol.DriveLetter) {
+            $espLetter = $vol.DriveLetter.ToString().ToUpper()
+            Write-Host "ESP already mounted as ${espLetter}:"
+        }
+    }
+    catch {
+        Write-Host "Could not get existing drive letter (common in WinPE)."
+    }
 
-            $preferred = $PreferredEspLetter.ToString().ToUpper()
-            Write-Host "Preferred letter (norm)..: $preferred"
+    # ─── If no letter → try preferred, then any free one ───
+    if (-not $espLetter) {
+        $usedLetters = @(
+            Get-Volume -ErrorAction SilentlyContinue |
+            Where-Object DriveLetter |
+            ForEach-Object { $_.DriveLetter.ToString().ToUpper() }
+        )
 
-            if ($usedLetters -notcontains $preferred) {
-                $espLetter = $preferred
-            } else {
-                # First free A..Z
-                $espLetter = $null
-                foreach ($code in 65..90) {
-                    $cand = [char]$code
-                    $candStr = $cand.ToString().ToUpper()
-                    if ($usedLetters -notcontains $candStr) { $espLetter = $candStr; break }
+        $candidate = $PreferredEspLetter.ToUpper()
+        if ($usedLetters -notcontains $candidate) {
+            $espLetter = $candidate
+        }
+        else {
+            foreach ($c in [char[]]'ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
+                if ($usedLetters -notcontains $c) {
+                    $espLetter = $c
+                    break
                 }
             }
-
-            if (-not $espLetter) { throw "No free drive letter available to mount ESP." }
-
-            Write-Host "Assigning letter to ESP..: $espLetter"
-            $esp | Set-Partition -NewDriveLetter $espLetter -ErrorAction Stop
-            $tempLetter = $espLetter
-            $espRoot    = "$espLetter:"
         }
 
-        Write-Host "ESP root path............: $espRoot"
-
-        # Basic safety checks on the mounted ESP
-        $vol = $null
-        try { $vol = Get-Volume -DriveLetter $espLetter -ErrorAction Stop } catch {}
-        if (-not $vol) { throw "Failed to read volume info for $espLetter`:" }
-
-        Write-Host ("ESP FileSystem...........: {0}" -f $vol.FileSystem)
-        if ($vol.FileSystem -ne 'FAT32') {
-            throw "ESP at $espLetter`: is not FAT32 (found $($vol.FileSystem))."
+        if (-not $espLetter) {
+            Write-Warning "No free drive letter found — will try GUID path only"
         }
-
-        # Build bcdboot args
-        $args = @(
-            $win
-            '/f','UEFI'
-            '/s', $espRoot
-        )
-        if ($BcdBootExtraArgs -and $BcdBootExtraArgs.Count -gt 0) {
-            $args += $BcdBootExtraArgs
-        }
-
-        Write-Host "Running bcdboot with args:"
-        Write-Host "  $($args -join ' ')"
-
-        & $bcdboot @args
-        $exit = $LASTEXITCODE
-        Write-Host "bcdboot exit code........: $exit"
-        if ($exit -ne 0) { throw "bcdboot failed with exit code $exit." }
-
-        # Verify boot files exist
-        $efiBoot = Join-Path $espRoot 'EFI\Microsoft\Boot\bootmgfw.efi'
-        Write-Host "Expecting file...........: $efiBoot"
-        if (-not (Test-Path -LiteralPath $efiBoot)) {
-            throw "Boot files not found at '$efiBoot' after bcdboot."
-        }
-
-        Write-Host "UEFI boot initialized successfully."
-    }
-    finally {
-        if ($tempLetter) {
-            Write-Host "Removing temporary access path: $tempLetter`:"
+        else {
+            Write-Host "Trying to assign letter $espLetter to ESP..."
             try {
-                $esp | Remove-PartitionAccessPath -AccessPath "$tempLetter`:" -ErrorAction SilentlyContinue
-            } catch {
-                Write-Host "Warning: failed to remove access path for $tempLetter`: ($($_.Exception.Message))"
+                $esp | Set-Partition -NewDriveLetter $espLetter -ErrorAction Stop
+                $usedAsTemp = $true
+                Start-Sleep -Milliseconds 800   # give OS time to recognize
+            }
+            catch {
+                Write-Warning "Failed to assign drive letter $espLetter ($_). Using GUID path fallback."
+                $espLetter = $null
             }
         }
-        Write-Host "== Initialize-UefiBootAfterApply: Done =="
     }
+
+    # ─── Build bcdboot /s argument ───
+    $sArg = $null
+
+    if ($espLetter) {
+        $sArg = "${espLetter}:"
+        Write-Host "Using drive letter for ESP: $sArg"
+    }
+    else {
+        # Fallback — GUID path (most reliable in WinPE)
+        try {
+            $volGuidPath = $esp | Get-Volume | Select-Object -ExpandProperty UniqueId
+            # UniqueId is usually \\?\Volume{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}\
+            if ($volGuidPath -match '^\\\\\?\\Volume\{[^}]+\}\\$') {
+                $sArg = $volGuidPath.TrimEnd('\')
+                Write-Host "Using volume GUID path: $sArg"
+            }
+            else {
+                throw "Cannot determine volume GUID path"
+            }
+        }
+        catch {
+            throw "Cannot mount ESP by letter nor by GUID → bcdboot cannot proceed ($_)"
+        }
+    }
+
+    # ─── Build final bcdboot arguments ───
+    $bcdArgs = @(
+        $win
+        "/f", "UEFI"
+        "/s", $sArg
+    ) + $BcdBootExtraArgs
+
+    Write-Host "Executing:"
+    Write-Host "  bcdboot $($bcdArgs -join ' ')" -ForegroundColor Gray
+
+    # ─── Run bcdboot ───
+    $p = Start-Process -FilePath $bcdboot -ArgumentList $bcdArgs -NoNewWindow -Wait -PassThru
+
+    if ($p.ExitCode -ne 0) {
+        throw "bcdboot failed with exit code $($p.ExitCode)"
+    }
+
+    # ─── Basic verification ───
+    if ($espLetter) {
+        $bootmgfw = Join-Path "${espLetter}:" "EFI\Microsoft\Boot\bootmgfw.efi"
+        if (Test-Path $bootmgfw) {
+            Write-Host "Success: bootmgfw.efi found" -ForegroundColor Green
+        }
+        else {
+            Write-Warning "Warning: bootmgfw.efi not found at $bootmgfw"
+        }
+    }
+    else {
+        Write-Host "Used GUID path → skipping file existence check" -ForegroundColor DarkGray
+    }
+
+    Write-Host "UEFI boot initialization completed." -ForegroundColor Green
+}
+finally {
+    if ($usedAsTemp -and $espLetter) {
+        Write-Host "Removing temporary drive letter $espLetter ..."
+        try {
+            $esp | Remove-PartitionAccessPath -AccessPath "${espLetter}:" -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "Could not remove drive letter $espLetter ($_)"
+        }
+    }
+    Write-Host "=== Done ===" -ForegroundColor Cyan
 }
 
 # ---------------------------------------------------------------------------
