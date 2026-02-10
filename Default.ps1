@@ -501,61 +501,100 @@ function Initialize-UefiBootAfterApply {
 
         [string] $PreferredEspLetter = 'S',
 
-        # Accept multiple args safely, e.g. -BcdBootExtraArgs '/l','en-US','/v'
+        # Use array to avoid collapsing args into one string
         [string[]] $BcdBootExtraArgs = @()
     )
 
+    Write-Host "== Initialize-UefiBootAfterApply =="
+    Write-Host "WindowsPath..............: $WindowsPath"
+    Write-Host "PreferredEspLetter.......: $PreferredEspLetter"
+    Write-Host "BcdBootExtraArgs (raw)...: $($BcdBootExtraArgs -join ' ')"
+
+    # Resolve and basic validation
     $win = (Resolve-Path -LiteralPath $WindowsPath).Path.TrimEnd('\')
-    if (-not (Test-Path -LiteralPath (Join-Path $win 'System32'))) {
-        throw "WindowsPath '$WindowsPath' doesn't look like a valid Windows directory."
+    Write-Host "Resolved Windows path....: $win"
+
+    $system32 = Join-Path $win 'System32'
+    if (-not (Test-Path -LiteralPath $system32)) {
+        throw "WindowsPath '$WindowsPath' doesn't look like a valid Windows directory (no System32)."
     }
 
     $bcdboot = Join-Path $env:SystemRoot 'System32\bcdboot.exe'
     if (-not (Test-Path -LiteralPath $bcdboot)) {
         throw "bcdboot.exe not found at '$bcdboot'."
     }
+    Write-Host "bcdboot path.............: $bcdboot"
 
-    # Locate the largest EFI System Partition (ESP)
+    # Find the EFI System Partition (largest one if multiple)
+    Write-Host "Locating EFI System Partition (ESP)..."
     $esp = Get-Partition -ErrorAction Stop |
            Where-Object { $_.GptType -eq '{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}' } |
            Sort-Object -Property Size -Descending |
            Select-Object -First 1
+
     if (-not $esp) { throw "EFI System Partition (ESP) not found." }
 
-    # Get existing letter if mounted
-    $existingLetter = ($esp | Get-Volume -ErrorAction SilentlyContinue).DriveLetter
+    Write-Host ("ESP located: Disk {0}, Part {1}, Size {2} bytes" -f $esp.DiskNumber, $esp.PartitionNumber, $esp.Size)
+
+    # Check if ESP already has a drive letter
+    $existingVol = $null
+    try { $existingVol = $esp | Get-Volume -ErrorAction Stop } catch {}
+    $existingLetter = $null
+    if ($existingVol -and $existingVol.DriveLetter) { $existingLetter = [string]$existingVol.DriveLetter }
+
+    Write-Host ("Existing ESP drive letter: {0}" -f ($existingLetter ? $existingLetter : "<none>"))
 
     $tempLetter = $null
+    $espLetter  = $null
+    $espRoot    = $null
+
     try {
-        $espRoot = if ($existingLetter) {
-            # Normalize to uppercase string for consistency
-            "$([string]$existingLetter.ToString().ToUpper()):"
+        if ($existingLetter) {
+            # Normalize to uppercase string, ensure colon is added only in root variable
+            $espLetter = $existingLetter.ToString().ToUpper()
+            $espRoot   = "$espLetter:"
         } else {
-            # Gather used letters as uppercase strings
-            $used = Get-Volume -ErrorAction SilentlyContinue |
-                    Where-Object { $_.DriveLetter } |
-                    ForEach-Object { [string]$_.DriveLetter.ToString().ToUpper() }
+            # Build list of used letters (strings)
+            $usedLetters = @()
+            foreach ($v in (Get-Volume -ErrorAction SilentlyContinue)) {
+                if ($v -and $v.DriveLetter) { $usedLetters += $v.DriveLetter.ToString().ToUpper() }
+            }
+            Write-Host "Used letters.............: $($usedLetters -join ', ')"
 
-            $preferred = [string]$PreferredEspLetter.ToString().ToUpper()
+            $preferred = $PreferredEspLetter.ToString().ToUpper()
+            Write-Host "Preferred letter (norm)..: $preferred"
 
-            if ($used -notcontains $preferred) {
-                $letter = $preferred
+            if ($usedLetters -notcontains $preferred) {
+                $espLetter = $preferred
             } else {
-                # Build A..Z as strings and pick the first free one
-                $all = 65..90 | ForEach-Object { [char]$_ }
-                $allStr = $all | ForEach-Object { $_.ToString().ToUpper() }
-                $letter = ($allStr | Where-Object { $used -notcontains $_ })[0]
+                # First free A..Z
+                $espLetter = $null
+                foreach ($code in 65..90) {
+                    $cand = [char]$code
+                    $candStr = $cand.ToString().ToUpper()
+                    if ($usedLetters -notcontains $candStr) { $espLetter = $candStr; break }
+                }
             }
 
-            if (-not $letter) { throw "No free drive letter available to mount ESP." }
+            if (-not $espLetter) { throw "No free drive letter available to mount ESP." }
 
-            # Mount ESP with the chosen letter
-            $esp | Set-Partition -NewDriveLetter $letter -ErrorAction Stop
-            $tempLetter = $letter
-            "$letter"
+            Write-Host "Assigning letter to ESP..: $espLetter"
+            $esp | Set-Partition -NewDriveLetter $espLetter -ErrorAction Stop
+            $tempLetter = $espLetter
+            $espRoot    = "$espLetter:"
         }
 
-        Write-Status -Level INFO -Message "Using ESP at $espRoot"
+        Write-Host "ESP root path............: $espRoot"
+
+        # Basic safety checks on the mounted ESP
+        $vol = $null
+        try { $vol = Get-Volume -DriveLetter $espLetter -ErrorAction Stop } catch {}
+        if (-not $vol) { throw "Failed to read volume info for $espLetter`:" }
+
+        Write-Host ("ESP FileSystem...........: {0}" -f $vol.FileSystem)
+        if ($vol.FileSystem -ne 'FAT32') {
+            throw "ESP at $espLetter`: is not FAT32 (found $($vol.FileSystem))."
+        }
 
         # Build bcdboot args
         $args = @(
@@ -567,25 +606,33 @@ function Initialize-UefiBootAfterApply {
             $args += $BcdBootExtraArgs
         }
 
-        Write-Status -Level STEP -Message ("Running: bcdboot {0}" -f ($args -join ' '))
-        & $bcdboot @args
-        if ($LASTEXITCODE -ne 0) { throw "bcdboot failed with exit code $LASTEXITCODE." }
+        Write-Host "Running bcdboot with args:"
+        Write-Host "  $($args -join ' ')"
 
+        & $bcdboot @args
+        $exit = $LASTEXITCODE
+        Write-Host "bcdboot exit code........: $exit"
+        if ($exit -ne 0) { throw "bcdboot failed with exit code $exit." }
+
+        # Verify boot files exist
         $efiBoot = Join-Path $espRoot 'EFI\Microsoft\Boot\bootmgfw.efi'
+        Write-Host "Expecting file...........: $efiBoot"
         if (-not (Test-Path -LiteralPath $efiBoot)) {
             throw "Boot files not found at '$efiBoot' after bcdboot."
         }
 
-        Write-Status -Level SUCCESS -Message "UEFI boot initialized successfully."
+        Write-Host "UEFI boot initialized successfully."
     }
     finally {
         if ($tempLetter) {
+            Write-Host "Removing temporary access path: $tempLetter`:"
             try {
-                $esp | Remove-PartitionAccessPath -AccessPath "$tempLetter" -ErrorAction SilentlyContinue
+                $esp | Remove-PartitionAccessPath -AccessPath "$tempLetter`:" -ErrorAction SilentlyContinue
             } catch {
-                # swallow cleanup errors
+                Write-Host "Warning: failed to remove access path for $tempLetter`: ($($_.Exception.Message))"
             }
         }
+        Write-Host "== Initialize-UefiBootAfterApply: Done =="
     }
 }
 
@@ -813,7 +860,6 @@ Show-Banner
 $sys = Get-SystemInfo
 Write-Status -Level INFO -Message ("PowerShell: {0}, OS: {1}" -f $sys.PSVersion, $sys.OSCaption)
 Write-Status -Level INFO -Message "Source: https://github.com/CMMON112/BetaBareMetal/blob/main/Default.ps1"
-Write-Host ""
 
 try {
     # 1) Select Disk + Partition
