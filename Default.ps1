@@ -283,7 +283,8 @@ function Get-DeviceSkuName {
     }
     if ([string]::IsNullOrWhiteSpace($sku)) { $sku = 'UnknownSKU' }
     $invalid = [IO.Path]::GetInvalidFileNameChars() -join ''
-    $sku -replace "[{0}]" -f [Regex]::Escape($invalid), '_'
+    $pattern = "[{0}]" -f [Regex]::Escape($invalid)
+    $sku -replace $pattern, '_'
 }
 
 # ---------------------------------------------------------------------------
@@ -364,11 +365,11 @@ function Get-OsCatalogEntry {
 
     $latest = $filtered | Sort-Object -Descending -Property @{Expression = { _ToVersion $_.Build } } | Select-Object -First 1
 
-    # Return concise object
+    # Return concise object (PS 5.1-friendly)
     [pscustomobject]@{
-        ESDUrl  = $latest.Url
-        Sha1    = ([string]::IsNullOrWhiteSpace([string]$latest.Sha1)   ? '' : [string]$latest.Sha1)
-        Sha256  = ([string]::IsNullOrWhiteSpace([string]$latest.Sha256) ? '' : [string]$latest.Sha256)
+        ESDUrl = $latest.Url
+        Sha1   = if ([string]::IsNullOrWhiteSpace([string]$latest.Sha1))   { '' } else { [string]$latest.Sha1 }
+        Sha256 = if ([string]::IsNullOrWhiteSpace([string]$latest.Sha256)) { '' } else { [string]$latest.Sha256 }
     }
 }
 
@@ -428,8 +429,8 @@ function Save-OsFile {
     [pscustomobject]@{
         Path           = $targetPath
         Bytes          = $fi.Length
-        VerifiedSHA1   = ($Sha1Hash   ? $Sha1Hash   : '')
-        VerifiedSHA256 = ($Sha256Hash ? $Sha256Hash : '')
+        VerifiedSHA1   = if ($Sha1Hash)   { $Sha1Hash }   else { '' }
+        VerifiedSHA256 = if ($Sha256Hash) { $Sha256Hash } else { '' }
         Verified       = $true
     }
 }
@@ -660,7 +661,7 @@ try {
         if (-not (Test-Path -LiteralPath $driversRoot)) { New-Item -ItemType Directory -Path $driversRoot -Force | Out-Null }
         Write-Status -Level INFO -Message "Drivers folder: $driversRoot"
 
-        $spPath = Join-Path $driversRoot ([IO.Path]::GetFileName([Uri]$DriverSoftPaqUrl).ToString())
+        $spPath = Join-Path $driversRoot ([IO.Path]::GetFileName(([Uri]$DriverSoftPaqUrl).ToString()))
         Download-File -Url $DriverSoftPaqUrl -DestPath $spPath | Out-Null
 
         $extractDir = Join-Path $driversRoot 'extracted'
