@@ -561,58 +561,183 @@ function Extract-SoftPaq {
 
 function Install-OfflineDrivers {
 <#
-    .SYNOPSIS
-        Injects drivers into an offline Windows image (one INF at a time for clarity).
+.SYNOPSIS
+    Recursively injects drivers into an offline or online Windows image using a single DISM session.
+.DESCRIPTION
+    Uses Add-WindowsDriver -Recurse to add all drivers found under the specified DriverRoot.
+    This is significantly faster than invoking Add-WindowsDriver once per INF.
+.PARAMETER ImagePath
+    Path to a mounted offline Windows directory (e.g., D:\Mount\Windows).
+    Use -Online to target the running OS instead.
+.PARAMETER DriverRoot
+    Root folder containing .INF-based drivers (subfolders will be searched recursively).
+.PARAMETER ForceUnsigned
+    Install unsigned drivers (only if you truly need to).
+.PARAMETER Online
+    Service the running OS instead of an offline image path.
+.PARAMETER ScratchDirectory
+    Local folder for DISM scratch (recommended on fast local disk).
+.PARAMETER LogPath
+    Path for DISM/servicing logs for auditing and troubleshooting.
+.EXAMPLE
+    Install-OfflineDrivers -ImagePath 'D:\Mount\Windows' -DriverRoot 'E:\Drivers' -Verbose
+.EXAMPLE
+    Install-OfflineDrivers -Online -DriverRoot 'E:\Drivers' -ScratchDirectory 'C:\Temp' -LogPath 'C:\Temp\AddDrivers.log'
 #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param(
-        [Parameter(Mandatory)][string] $ImagePath,     # e.g., C:\
-        [Parameter(Mandatory)][string] $DriverRoot,
-        [switch] $ForceUnsigned
+        [Parameter(ParameterSetName='Offline', Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ImagePath,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $DriverRoot,
+
+        [Parameter()]
+        [switch] $ForceUnsigned,
+
+        [Parameter(ParameterSetName='Online', Mandatory)]
+        [switch] $Online,
+
+        [Parameter()]
+        [string] $ScratchDirectory,
+
+        [Parameter()]
+        [string] $LogPath
     )
-    if (-not (Test-Path -Path $ImagePath -PathType Container)) { throw "ImagePath '$ImagePath' is not a valid folder." }
-    if (-not (Test-Path -Path $DriverRoot -PathType Container)) { throw "DriverRoot '$DriverRoot' is not a valid folder." }
-    if (-not (Get-Command Add-WindowsDriver -ErrorAction SilentlyContinue)) {
-        throw "Add-WindowsDriver not found. Ensure DISM PowerShell module is available."
+
+    # --- Basic validation ---
+    if (-not (Test-Path -Path $DriverRoot -PathType Container)) {
+        throw "DriverRoot '$DriverRoot' is not a valid folder."
     }
 
-    Write-Status -Level STEP -Message "Scanning for driver INF files under: $DriverRoot"
+    # Pre-scan drivers so we can return useful counts
+    Write-Verbose "Scanning for INF files under: $DriverRoot"
     $infs = Get-ChildItem -Path $DriverRoot -Filter *.inf -File -Recurse -ErrorAction SilentlyContinue
-    $count = $infs.Count
-    Write-Status -Level INFO -Message "Found $count driver INF file(s)."
-    if ($count -eq 0) {
-        return [pscustomobject]@{ ImagePath=$ImagePath; DriverRoot=$DriverRoot; DriversFound=0; Succeeded=0; Failed=0; Timestamp=(Get-Date) }
-    }
+    $found = $infs.Count
+    Write-Verbose "Found $found driver INF file(s)."
 
-    $ok = 0; $fail = 0; $i = 0; $activity = "Injecting drivers to $ImagePath"
-    foreach ($inf in $infs) {
-        $i++
-        Write-Progress -Activity $activity -Status ("[{0}/{1}] {2}" -f $i,$count,$inf.Name) -PercentComplete ([int](($i/$count)*100))
-        Write-Host ("[{0}/{1}] {2}" -f $i, $count, $inf.FullName) -ForegroundColor Yellow
-
-        $params = @{ Path=$ImagePath; Driver=$inf.FullName; ErrorAction='Stop' }
-        if ($ForceUnsigned) { $params['ForceUnsigned'] = $true }
-
-        try {
-            if ($PSCmdlet.ShouldProcess($inf.FullName, "Add-WindowsDriver to '$ImagePath'")) {
-                Add-WindowsDriver @params | Out-Host
-            }
-            Write-Host "   ✔ Success" -ForegroundColor Green
-            $ok++
-        } catch {
-            Write-Warning ("   ✖ Failed: {0}" -f $_.Exception.Message)
-            $fail++
+    if ($found -eq 0) {
+        Write-Verbose "No INF files found—nothing to do."
+        return [pscustomobject]@{
+            Target         = if ($Online) { 'Online' } else { $ImagePath }
+            DriverRoot     = $DriverRoot
+            DriversFound   = 0
+            AttemptedMode  = if ($Online) { 'Online' } else { 'Offline' }
+            Succeeded      = 0
+            Failed         = 0
+            Elapsed        = '00:00:00'
+            LogPath        = $LogPath
+            ScratchDir     = $ScratchDirectory
+            Timestamp      = (Get-Date)
         }
     }
-    Write-Progress -Activity $activity -Completed -Status "Done"
 
+    # Offline-specific checks
+    if (-not $Online) {
+        if (-not (Test-Path -Path $ImagePath -PathType Container)) {
+            throw "ImagePath '$ImagePath' is not a valid folder."
+        }
+        # Heuristic to ensure it looks like an offline Windows directory
+        $configDir = Join-Path $ImagePath 'Windows\System32\Config'
+        if (-not (Test-Path $configDir)) {
+            throw "ImagePath '$ImagePath' does not look like a mounted offline Windows directory (missing Windows\System32\Config)."
+        }
+    }
+
+    # Build parameters for Add-WindowsDriver
+    $addParams = @{
+        ErrorAction = 'Stop'
+        Recurse     = $true
+        Driver      = $DriverRoot
+    }
+
+    if ($Online) {
+        $addParams['Online'] = $true
+    } else {
+        $addParams['Path']   = $ImagePath
+    }
+
+    if ($ForceUnsigned) {
+        $addParams['ForceUnsigned'] = $true
+    }
+
+    # Add ScratchDirectory/LogPath if provided (these map to DISM scratch/log under the hood)
+    if ($PSBoundParameters.ContainsKey('ScratchDirectory')) {
+        if (-not (Test-Path $ScratchDirectory)) {
+            New-Item -ItemType Directory -Path $ScratchDirectory -Force | Out-Null
+        }
+        $addParams['ScratchDirectory'] = $ScratchDirectory
+    }
+    if ($PSBoundParameters.ContainsKey('LogPath')) {
+        # Ensure directory exists
+        $logDir = Split-Path -Parent $LogPath
+        if ($logDir -and -not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+        $addParams['LogPath'] = $LogPath
+    }
+
+    $targetLabel = if ($Online) { 'Online OS' } else { "Offline image: $ImagePath" }
+    $what = "Add all drivers (recursively) from '$DriverRoot' to $targetLabel"
+
+    $succeeded = 0
+    $failed    = 0
+    $elapsed = [System.Diagnostics.Stopwatch]::StartNew()
+
+    try {
+        if ($PSCmdlet.ShouldProcess($targetLabel, $what)) {
+            # Single bulk call — fast path
+            Add-WindowsDriver @addParams | Out-Null
+
+            # Note: DISM may skip duplicates/older versions; treat as success for the bulk operation.
+            $succeeded = $found
+        }
+    }
+    catch {
+        # Bulk call failed; fall back to per-INF to isolate failures while keeping recursion logic conceptually intact
+        Write-Verbose "Bulk add failed: $($_.Exception.Message)"
+        Write-Verbose "Falling back to per-INF installation for error isolation…"
+
+        foreach ($inf in $infs) {
+            try {
+                if ($PSCmdlet.ShouldProcess($inf.FullName, "Add-WindowsDriver")) {
+                    $singleParams = @{
+                        ErrorAction = 'Stop'
+                        Driver      = $inf.FullName
+                    }
+                    if ($Online) { $singleParams['Online'] = $true } else { $singleParams['Path'] = $ImagePath }
+                    if ($ForceUnsigned) { $singleParams['ForceUnsigned'] = $true }
+                    if ($PSBoundParameters.ContainsKey('ScratchDirectory')) { $singleParams['ScratchDirectory'] = $ScratchDirectory }
+                    if ($PSBoundParameters.ContainsKey('LogPath'))          { $singleParams['LogPath']          = $LogPath }
+
+                    Add-WindowsDriver @singleParams | Out-Null
+                    $succeeded++
+                }
+            }
+            catch {
+                $failed++
+                Write-Verbose ("Failed: {0} -> {1}" -f $inf.FullName, $_.Exception.Message)
+            }
+        }
+    }
+    finally {
+        $elapsed.Stop()
+    }
+
+    # Return a summary object
     [pscustomobject]@{
-        ImagePath    = $ImagePath
-        DriverRoot   = $DriverRoot
-        DriversFound = $count
-        Succeeded    = $ok
-        Failed       = $fail
-        Timestamp    = (Get-Date)
+        Target         = if ($Online) { 'Online' } else { $ImagePath }
+        DriverRoot     = $DriverRoot
+        DriversFound   = $found
+        AttemptedMode  = if ($Online) { 'Online' } else { 'Offline' }
+        Succeeded      = $succeeded
+        Failed         = $failed
+        Elapsed        = ('{0:c}' -f $elapsed.Elapsed)
+        LogPath        = $LogPath
+        ScratchDir     = $ScratchDirectory
+        Timestamp      = (Get-Date)
     }
 }
 
