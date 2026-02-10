@@ -552,7 +552,7 @@ function Initialize-UefiBootAfterApply {
             # Mount ESP with the chosen letter
             $esp | Set-Partition -NewDriveLetter $letter -ErrorAction Stop
             $tempLetter = $letter
-            "$letter:"
+            "$letter :"
         }
 
         Write-Status -Level INFO -Message "Using ESP at $espRoot"
@@ -581,7 +581,7 @@ function Initialize-UefiBootAfterApply {
     finally {
         if ($tempLetter) {
             try {
-                $esp | Remove-PartitionAccessPath -AccessPath "$tempLetter:" -ErrorAction SilentlyContinue
+                $esp | Remove-PartitionAccessPath -AccessPath "$tempLetter :" -ErrorAction SilentlyContinue
             } catch {
                 # swallow cleanup errors
             }
