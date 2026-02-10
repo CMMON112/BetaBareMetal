@@ -88,7 +88,7 @@ function Write-Status {
 
     # Console colors (not emojis); ignored when -NoColor is used
     $color = switch ($Level) {
-        'STEP'    { 'Magenta' }
+        'STEP'    { 'Gray' }
         'INFO'    { 'Gray' }
         'WARN'    { 'Yellow' }
         'ERROR'   { 'Red' }
@@ -495,9 +495,14 @@ function Apply-OsImage {
 function Initialize-UefiBootAfterApply {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidateScript({ Test-Path $_ -PathType Container })][string] $WindowsPath,
+        [Parameter(Mandatory)]
+        [ValidateScript({ Test-Path $_ -PathType Container })]
+        [string] $WindowsPath,
+
         [string] $PreferredEspLetter = 'S',
-        [string] $BcdBootExtraArgs = ''
+
+        # Accept multiple args safely, e.g. -BcdBootExtraArgs '/l','en-US','/v'
+        [string[]] $BcdBootExtraArgs = @()
     )
 
     $win = (Resolve-Path -LiteralPath $WindowsPath).Path.TrimEnd('\')
@@ -506,41 +511,80 @@ function Initialize-UefiBootAfterApply {
     }
 
     $bcdboot = Join-Path $env:SystemRoot 'System32\bcdboot.exe'
-    if (-not (Test-Path -LiteralPath $bcdboot)) { throw "bcdboot.exe not found at '$bcdboot'." }
+    if (-not (Test-Path -LiteralPath $bcdboot)) {
+        throw "bcdboot.exe not found at '$bcdboot'."
+    }
 
+    # Locate the largest EFI System Partition (ESP)
     $esp = Get-Partition -ErrorAction Stop |
            Where-Object { $_.GptType -eq '{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}' } |
-           Sort-Object -Property Size -Descending | Select-Object -First 1
+           Sort-Object -Property Size -Descending |
+           Select-Object -First 1
     if (-not $esp) { throw "EFI System Partition (ESP) not found." }
 
+    # Get existing letter if mounted
     $existingLetter = ($esp | Get-Volume -ErrorAction SilentlyContinue).DriveLetter
+
     $tempLetter = $null
     try {
-        $espRoot = if ($existingLetter) { "$existingLetter`:" } else {
-            $used = (Get-Volume -ErrorAction SilentlyContinue).DriveLetter | Where-Object { $_ } | ForEach-Object { $_.ToUpper() }
-            $letter = if ($used -notcontains $PreferredEspLetter.ToUpper()) { $PreferredEspLetter.ToUpper() }
-                      else { (65..90 | ForEach-Object { [char]$_ } | Where-Object { $used -notcontains $_ })[0] }
+        $espRoot = if ($existingLetter) {
+            # Normalize to uppercase string for consistency
+            "$([string]$existingLetter.ToString().ToUpper()):"
+        } else {
+            # Gather used letters as uppercase strings
+            $used = Get-Volume -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DriveLetter } |
+                    ForEach-Object { [string]$_.DriveLetter.ToString().ToUpper() }
+
+            $preferred = [string]$PreferredEspLetter.ToString().ToUpper()
+
+            if ($used -notcontains $preferred) {
+                $letter = $preferred
+            } else {
+                # Build A..Z as strings and pick the first free one
+                $all = 65..90 | ForEach-Object { [char]$_ }
+                $allStr = $all | ForEach-Object { $_.ToString().ToUpper() }
+                $letter = ($allStr | Where-Object { $used -notcontains $_ })[0]
+            }
+
             if (-not $letter) { throw "No free drive letter available to mount ESP." }
+
+            # Mount ESP with the chosen letter
             $esp | Set-Partition -NewDriveLetter $letter -ErrorAction Stop
             $tempLetter = $letter
-            "$letter`:"
+            "$letter:"
         }
 
         Write-Status -Level INFO -Message "Using ESP at $espRoot"
-        $args = @("$win", '/f', 'UEFI', '/s', $espRoot)
-        if ($BcdBootExtraArgs) { $args += $BcdBootExtraArgs }
 
-        Write-Status -Level STEP -Message "Running: bcdboot $($args -join ' ')"
+        # Build bcdboot args
+        $args = @(
+            $win
+            '/f','UEFI'
+            '/s', $espRoot
+        )
+        if ($BcdBootExtraArgs -and $BcdBootExtraArgs.Count -gt 0) {
+            $args += $BcdBootExtraArgs
+        }
+
+        Write-Status -Level STEP -Message ("Running: bcdboot {0}" -f ($args -join ' '))
         & $bcdboot @args
         if ($LASTEXITCODE -ne 0) { throw "bcdboot failed with exit code $LASTEXITCODE." }
 
         $efiBoot = Join-Path $espRoot 'EFI\Microsoft\Boot\bootmgfw.efi'
-        if (-not (Test-Path -LiteralPath $efiBoot)) { throw "Boot files not found at '$efiBoot' after bcdboot." }
+        if (-not (Test-Path -LiteralPath $efiBoot)) {
+            throw "Boot files not found at '$efiBoot' after bcdboot."
+        }
 
         Write-Status -Level SUCCESS -Message "UEFI boot initialized successfully."
-    } finally {
+    }
+    finally {
         if ($tempLetter) {
-            try { $esp | Remove-PartitionAccessPath -AccessPath "$tempLetter`:" -ErrorAction SilentlyContinue } catch { }
+            try {
+                $esp | Remove-PartitionAccessPath -AccessPath "$tempLetter:" -ErrorAction SilentlyContinue
+            } catch {
+                # swallow cleanup errors
+            }
         }
     }
 }
