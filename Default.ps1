@@ -150,9 +150,6 @@ function Write-Divider {
 }
 
 function Show-Banner {
-    Clear-Host
-
-    # Use a here-string for multi-line ASCII text
     $banner = @"
             ███╗   ███╗ ██████╗ ███╗   ██╗ █████╗ ███████╗██╗  ██╗                
             ████╗ ████║██╔═══██╗████╗  ██║██╔══██╗██╔════╝██║  ██║                
@@ -168,8 +165,6 @@ function Show-Banner {
 ██████╔╝╚██████╔╝██║███████╗██████╔╝    ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗
 ╚═════╝  ╚═════╝ ╚═╝╚══════╝╚═════╝     ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 "@
-
-    # Split into lines and output with color
     $banner -split "`r?`n" | ForEach-Object {
         Write-Host $_ -ForegroundColor Cyan
     }
