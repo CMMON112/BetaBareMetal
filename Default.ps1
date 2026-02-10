@@ -645,7 +645,7 @@ function Initialize-UefiBootAfterApply {
     }
 
     Write-Host "UEFI boot initialization completed." -ForegroundColor Green
-}
+
 finally {
     if ($usedAsTemp -and $espLetter) {
         Write-Host "Removing temporary drive letter $espLetter ..."
@@ -657,6 +657,7 @@ finally {
         }
     }
     Write-Host "=== Done ===" -ForegroundColor Cyan
+}
 }
 
 # ---------------------------------------------------------------------------
