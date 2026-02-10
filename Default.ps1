@@ -1,54 +1,91 @@
 # Monash BuildForge – Bare Metal Init (WinRE / PS 5.1 compatible)
+# Refactored: structured modules, unified logging/status, safer partitioning, hardened downloads
+# Requires: WinPE/WinRE with DISM tools, bcdboot; network for catalog/ESD
+# Note: Destructive to target disk
+
+[CmdletBinding()]
+param(
+    # --- OS Selection ---
+    [ValidateSet('Windows 11')] [string] $OperatingSystem = 'Windows 11',
+    [ValidateSet('24H2','25H2','26H2')] [string] $ReleaseId = '25H2',
+    [ValidateSet('amd64','arm64')] [string] $Architecture = 'amd64',
+    [ValidateSet('en-us')] [string] $LanguageCode = 'en-us',
+    [ValidateSet('Volume')] [string] $License = 'Volume',
+
+    # Set which image index to apply from the ESD/WIM
+    [int] $ImageIndex = 6,
+
+    # Destination and temporary paths
+    [string] $OsDownloadDir = 'C:\BuildOSD',
+
+    # Optional targeting (leave blank to auto-select internal, non-USB)
+    [int] $TargetDiskNumber = -1,
+
+    # SoftPaq (HP example) – can be overridden; leave empty to skip
+    [string] $DriverSoftPaqUrl = 'https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe',
+
+    # Steps control
+    [switch] $SkipPartitioning,
+    [switch] $SkipApplyImage,
+    [switch] $SkipDrivers,
+    [switch] $SkipBootInit,
+
+    # Extra bcdboot args, e.g. '/l en-US'
+    [string] $BcdBootExtraArgs = '',
+
+    # Catalog (CLIXML or XML) – default from OSD project cache
+    [string] $CatalogUri = 'https://raw.githubusercontent.com/OSDeploy/OSD/refs/heads/master/cache/os-catalogs/build-operatingsystems.xml'
+)
 
 $ErrorActionPreference = 'Stop'
 
+# ---------------------------------------------------------------------------
+# STATUS + LOGGING
+# ---------------------------------------------------------------------------
+
 function Get-TempRoot {
-    # WinRE usually has X:\; $env:TEMP may or may not exist/point to a valid path
     if ($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)) { return $env:TEMP }
     return 'X:\'
 }
 
-# Precreate a log file (ensure directory exists)
-$script:LogPath = Join-Path -Path (Get-TempRoot) -ChildPath ("BuildForge_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
+$script:LogPath = Join-Path (Get-TempRoot) ("BuildForge_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
 try {
     $logDir = Split-Path -Path $script:LogPath -Parent
-    if (-not (Test-Path -LiteralPath $logDir)) {
-        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    }
+    if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
     New-Item -ItemType File -Path $script:LogPath -Force | Out-Null
-} catch {}
+} catch { }
 
 function Write-Log {
     param(
-        [string]$Message,
-        [ValidateSet('INFO','WARN','ERROR')][string]$Level = 'INFO'
+        [Parameter(Mandatory)][string] $Message,
+        [ValidateSet('INFO','STEP','WARN','ERROR','SUCCESS')][string] $Level = 'INFO'
     )
-    $line = "[{0:HH:mm:ss}] [{1}] {2}" -f (Get-Date), $Level, $Message
-    Write-Host $line
-    try {
-        Add-Content -Path $script:LogPath -Value $line -ErrorAction SilentlyContinue
-    } catch {}
+    $ts = Get-Date -Format 'HH:mm:ss'
+    $line = "[${ts}] [$Level] $Message"
+    try { Add-Content -Path $script:LogPath -Value $line -ErrorAction SilentlyContinue } catch { }
 }
 
-function Log {
+function Write-Status {
     param(
-        [Parameter(Mandatory=$true)][string]$m,
-        [ValidateSet('INFO','WARN','ERROR')][string]$Level = 'INFO'
+        [Parameter(Mandatory)][string] $Message,
+        [ValidateSet('INFO','STEP','WARN','ERROR','SUCCESS')][string] $Level = 'INFO'
     )
-    Write-Log -Message $m -Level $Level
-}
-
-function Coalesce {
-    param(
-        [Parameter(Mandatory=$true)][AllowNull()][object]$Value,
-        [string]$Fallback = ''
-    )
-    if ($null -eq $Value) { return $Fallback }
-    if ($Value -is [string]) {
-        if ([string]::IsNullOrWhiteSpace([string]$Value)) { return $Fallback }
-        return [string]$Value
+    $prefix = switch ($Level) {
+        'STEP'    { '▶' }
+        'INFO'    { '•' }
+        'WARN'    { '!' }
+        'ERROR'   { '✖' }
+        'SUCCESS' { '✔' }
     }
-    return $Value
+    $color = switch ($Level) {
+        'STEP'    { 'Magenta' }
+        'INFO'    { 'Gray' }
+        'WARN'    { 'Yellow' }
+        'ERROR'   { 'Red' }
+        'SUCCESS' { 'Green' }
+    }
+    Write-Host ("{0} {1}" -f $prefix, $Message) -ForegroundColor $color
+    Write-Log -Message $Message -Level $Level
 }
 
 function Show-Banner {
@@ -72,114 +109,130 @@ function Show-Banner {
 "@ | Write-Host -ForegroundColor Cyan
 }
 
-# Confirm GitHub source (keep as info only)
-$ScriptSourceUrl = 'https://github.com/CMMON112/BetaBareMetal/blob/main/Default.ps1'
-Show-Banner
-Write-Log "This script is being executed from GitHub source:"
-Write-Host "  $ScriptSourceUrl" -ForegroundColor Yellow
-Write-Host ""
-
-# Environment banner
-try {
-    $osCaption = (Get-CimInstance Win32_OperatingSystem).Caption
-} catch {
-    $osCaption = 'Unknown/WinRE'
-}
-Write-Log ("PowerShell: {0}, OS: {1}" -f $PSVersionTable.PSVersion, $osCaption)
+# ---------------------------------------------------------------------------
+# UTILITIES
+# ---------------------------------------------------------------------------
 
 function Enable-Tls12 {
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+}
+
+function Get-SystemInfo {
+    $osCaption = 'Unknown/WinRE'
+    try { $osCaption = (Get-CimInstance Win32_OperatingSystem).Caption } catch { }
+    [pscustomobject]@{
+        PSVersion = $PSVersionTable.PSVersion
+        OSCaption = $osCaption
+    }
+}
+
+function Resolve-Curl {
+    # Prefer OS-native curl to avoid IWR performance/redirect issues
+    $candidates = @(
+        (Join-Path $env:WINDIR 'System32\curl.exe'),
+        'curl.exe'
+    )
+    foreach ($c in $candidates) {
+        if (Get-Command $c -ErrorAction SilentlyContinue) { return (Get-Command $c).Path }
+    }
+    return $null
 }
 
 function Download-File {
     param(
-        [Parameter(Mandatory=$true)][string]$Url,
-        [Parameter(Mandatory=$true)][string]$DestPath,
-        [int]$Retries = 2
+        [Parameter(Mandatory)][string] $Url,
+        [Parameter(Mandatory)][string] $DestPath,
+        [int] $Retries = 2
     )
     Enable-Tls12
+    $curl = Resolve-Curl
     for ($i=0; $i -le $Retries; $i++) {
-        Log ("Downloading: {0} (attempt {1}/{2})" -f $Url, ($i+1), ($Retries+1))
-        $curl = "X:\Windows\System32\curl.exe"
+        Write-Status -Level INFO -Message ("Downloading: {0} (attempt {1}/{2})" -f $Url, ($i+1), ($Retries+1))
         try {
             if ($curl) {
-                & curl.exe --fail --location --silent --show-error -o "$DestPath" "$Url"
-                if ($LASTEXITCODE -ne 0) { throw "curl download failed with exit code $LASTEXITCODE." }
+                & $curl --fail --location --silent --show-error --connect-timeout 30 --output "$DestPath" "$Url"
+                if ($LASTEXITCODE -ne 0) { throw "curl exited with $LASTEXITCODE." }
             } else {
-                Invoke-WebRequest -Uri $Url -OutFile $DestPath -UseBasicParsing
+                Invoke-WebRequest -Uri $Url -OutFile $DestPath -UseBasicParsing -ErrorAction Stop
             }
-            if (Test-Path -LiteralPath $DestPath) { return }
-            throw "Download succeeded but file missing on disk."
+            if (Test-Path -LiteralPath $DestPath) { return $DestPath }
+            throw "HTTP OK but file missing on disk."
         } catch {
             if ($i -lt $Retries) {
                 Start-Sleep -Seconds 2
             } else {
-                throw $_
+                throw "Failed to download '$Url' after $($Retries+1) attempts. $($_.Exception.Message)"
             }
         }
     }
 }
 
+# ---------------------------------------------------------------------------
+# DISK / PARTITIONS (UEFI/GPT, Recovery at end)
+# ---------------------------------------------------------------------------
+
 function Get-InternalTargetDisk {
-    # Prefer a non-USB, non-removable, online, non-boot/system disk (largest)
+    param([int] $PreferredNumber = -1)
+
+    if ($PreferredNumber -ge 0) {
+        $d = Get-Disk -Number $PreferredNumber -ErrorAction Stop
+        if ($d.BusType -eq 'USB') { throw "Disk $PreferredNumber is USB; refusing." }
+        if ($d.IsOffline) { try { Set-Disk -Number $d.Number -IsOffline:$false -ErrorAction Stop } catch { } }
+        if ($d.IsReadOnly) { try { Set-Disk -Number $d.Number -IsReadOnly:$false -ErrorAction Stop } catch { } }
+        return $d
+    }
+
     $preferred = Get-Disk | Where-Object {
         $_.BusType -ne 'USB' -and
-        $_.IsOffline -eq $false -and
-        $_.IsReadOnly -eq $false -and
-        $_.IsBoot -eq $false -and
-        $_.IsSystem -eq $false
+        -not $_.IsOffline -and
+        -not $_.IsReadOnly -and
+        -not $_.IsBoot -and
+        -not $_.IsSystem
     } | Sort-Object Size -Descending
 
-    if (-not $preferred -or $preferred.Count -eq 0) {
+    if (-not $preferred) {
         foreach ($d in (Get-Disk | Where-Object { $_.BusType -ne 'USB' -and $_.IsOffline })) {
-            try { Set-Disk -Number $d.Number -IsOffline:$false -ErrorAction Stop } catch {}
+            try { Set-Disk -Number $d.Number -IsOffline:$false -ErrorAction Stop } catch { }
         }
         $preferred = Get-Disk | Where-Object {
             $_.BusType -ne 'USB' -and
-            $_.IsOffline -eq $false -and
-            $_.IsReadOnly -eq $false -and
-            $_.IsBoot -eq $false -and
-            $_.IsSystem -eq $false
+            -not $_.IsOffline -and
+            -not $_.IsReadOnly -and
+            -not $_.IsBoot -and
+            -not $_.IsSystem
         } | Sort-Object Size -Descending
     }
 
-    if (-not $preferred -or $preferred.Count -eq 0) { throw "No suitable internal disk found (non-USB)." }
+    if (-not $preferred) { throw "No suitable internal disk found (non-USB)." }
     return ($preferred | Select-Object -First 1)
 }
 
 function Prep-Disk-Win11Layout {
-    param([Parameter(Mandatory=$true)][int]$DiskNumber)
+    param([Parameter(Mandatory)][int] $DiskNumber)
 
-    Log "Preparing Disk $DiskNumber for Windows 11 (UEFI/GPT layout with Recovery at end)"
-
-    # Ensure disk is writable and online
+    Write-Status -Level STEP -Message "Preparing Disk $DiskNumber for Windows 11 (UEFI/GPT, Recovery at end)"
+    # Online & writable
     Set-Disk -Number $DiskNumber -IsReadOnly:$false -ErrorAction SilentlyContinue | Out-Null
     Set-Disk -Number $DiskNumber -IsOffline:$false -ErrorAction SilentlyContinue | Out-Null
 
-    Log "Clearing disk (ALL data will be erased)"
-    Clear-Disk -Number $DiskNumber -RemoveData -Confirm:$false -RemoveOEM
+    Write-Status -Level WARN -Message "Clearing disk $DiskNumber (ALL DATA WILL BE ERASED)"
+    Clear-Disk -Number $DiskNumber -RemoveData -RemoveOEM -Confirm:$false
     Initialize-Disk -Number $DiskNumber -PartitionStyle GPT
 
-    Log "Creating Windows 11 standard partitions"
-
-    # 1. EFI System Partition (ESP) - 100 MB
+    # 1) ESP (FAT32, 100MB)
     $esp = New-Partition -DiskNumber $DiskNumber -Size 100MB `
         -GptType "{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}"
     Format-Volume -Partition $esp -FileSystem FAT32 -NewFileSystemLabel "System" -Confirm:$false -Force
 
-    # 2. Microsoft Reserved Partition (MSR) - 16 MB
+    # 2) MSR (16MB)
     New-Partition -DiskNumber $DiskNumber -Size 16MB `
         -GptType "{E3C9E316-0B5C-4DB8-817D-F92DF00215AE}" | Out-Null
 
-    # 3. Windows partition (C:) - all space except last 750MB
-    $disk = Get-Disk -Number $DiskNumber
-    $usable = ($disk | Get-Disk).LargestFreeExtent
-    $windowsSize = $usable - 750MB
-
-    $windows = New-Partition -DiskNumber $DiskNumber -Size $windowsSize `
+    # 3) Windows partition – take ALL remaining, then shrink by 750MB for Recovery
+    $windows = New-Partition -DiskNumber $DiskNumber -UseMaximumSize `
         -GptType "{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}" -AssignDriveLetter
 
-    # Remove C: from any existing partition (WinRE quirk)
+    # Work around WinRE letter quirks: free up C: if occupied
     try {
         $cPart = Get-Partition -DriveLetter C -ErrorAction SilentlyContinue
         if ($cPart) {
@@ -187,778 +240,455 @@ function Prep-Disk-Win11Layout {
                 -PartitionNumber $cPart.PartitionNumber -AccessPath "C:\" `
                 -ErrorAction SilentlyContinue
         }
-    } catch {}
+    } catch { }
 
-    # Format Windows partition
     Format-Volume -Partition $windows -FileSystem NTFS -NewFileSystemLabel "Windows" -Confirm:$false -Force
     Set-Partition -DiskNumber $windows.DiskNumber -PartitionNumber $windows.PartitionNumber -NewDriveLetter C | Out-Null
 
-    # 4. Recovery partition (750 MB) - at end of disk
-    $recovery = New-Partition -DiskNumber $DiskNumber -UseMaximumSize `
-        -GptType "{DE94BBA4-06D1-4D40-A16A-BFD50179D6AC}"
-    Format-Volume -Partition $recovery -FileSystem NTFS -NewFileSystemLabel "Recovery" -Confirm:$false -Force
+    # Shrink Windows volume by 750MB
+    $vol = Get-Volume -DriveLetter C
+    $part = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $windows.PartitionNumber
+    $supported = Get-PartitionSupportedSize -DiskNumber $DiskNumber -PartitionNumber $part.PartitionNumber
+    $shrinkBy = 750MB
+    $targetSize = [math]::Max($supported.SizeMin, ($part.Size - $shrinkBy))
+    if ($targetSize -lt $part.Size) {
+        Write-Status -Level INFO -Message "Shrinking Windows partition by 750MB to create Recovery at end"
+        Resize-Partition -DiskNumber $DiskNumber -PartitionNumber $part.PartitionNumber -Size $targetSize
+    } else {
+        Write-Status -Level WARN -Message "Unable to shrink Windows partition; Recovery will not be created at end."
+    }
 
-    Log "Disk prepared with Windows 11 layout. C: ready and Recovery at end."
+    # 4) Recovery partition (750MB) at end (if space exists)
+    $recovery = $null
+    try {
+        $recovery = New-Partition -DiskNumber $DiskNumber -UseMaximumSize `
+            -GptType "{DE94BBA4-06D1-4D40-A16A-BFD50179D6AC}"
+        Format-Volume -Partition $recovery -FileSystem NTFS -NewFileSystemLabel "Recovery" -Confirm:$false -Force
+    } catch {
+        Write-Status -Level WARN -Message "Recovery partition creation skipped: $($_.Exception.Message)"
+    }
+
+    Write-Status -Level SUCCESS -Message "Disk prepared. C: ready; Recovery created at end (if possible)."
 }
 
+# ---------------------------------------------------------------------------
+# DEVICE / MODEL INFO
+# ---------------------------------------------------------------------------
 
 function Get-DeviceSkuName {
-    # Use SystemSKUNumber; fallback to BaseBoard.Product
     $sku = ''
-    try { $sku = (Get-CimInstance Win32_ComputerSystem).SystemSKUNumber } catch {}
+    try { $sku = (Get-CimInstance Win32_ComputerSystem).SystemSKUNumber } catch { }
     if ([string]::IsNullOrWhiteSpace($sku)) {
-        try { $sku = (Get-CimInstance Win32_BaseBoard).Product } catch {}
+        try { $sku = (Get-CimInstance Win32_BaseBoard).Product } catch { }
     }
-    if ([string]::IsNullOrWhiteSpace($sku)) { $sku = "UnknownSKU" }
-    # Clean for folder name
+    if ([string]::IsNullOrWhiteSpace($sku)) { $sku = 'UnknownSKU' }
     $invalid = [IO.Path]::GetInvalidFileNameChars() -join ''
-    $sku = ($sku -replace "[{0}]" -f [Regex]::Escape($invalid), '_')
-    return $sku
+    $sku -replace "[{0}]" -f [Regex]::Escape($invalid), '_'
 }
 
-function Extract-SoftPaq {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$ExePath,
+# ---------------------------------------------------------------------------
+# OS CATALOG + DOWNLOAD
+# ---------------------------------------------------------------------------
 
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$DestDir,
-
-        # Maximum seconds to wait for parent + descendants
-        [int]$TimeoutSec = 600,
-
-        # Additional child process names to monitor (case-insensitive; wildcards supported)
-        [string[]]$ExtraChildNames = @()
-    )
-
-    begin {
-        function Log {
-            param(
-                [Parameter(Mandatory=$true)][string]$Message,
-                [ValidateSet('INFO','WARN','ERROR')][string]$Level = 'INFO'
-            )
-            $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-            Write-Host "[$ts][$Level] $Message"
-        }
-
-        function Get-DescendantProcesses {
-            param(
-                [Parameter(Mandatory=$true)][int]$RootPid
-            )
-            # Snapshot process tree via CIM
-            $procs = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name
-            $byParent = $procs | Group-Object ParentProcessId -AsHashTable -AsString
-
-            $queue = [System.Collections.Generic.Queue[int]]::new()
-            $desc  = [System.Collections.Generic.List[object]]::new()
-            $queue.Enqueue($RootPid)
-
-            while ($queue.Count -gt 0) {
-                $currPid = $queue.Dequeue()
-                $children = $byParent[[string]$currPid]
-                if ($children) {
-                    foreach ($c in $children) {
-                        $desc.Add($c)
-                        $queue.Enqueue([int]$c.ProcessId)
-                    }
-                }
-            }
-
-            # Keep only currently running descendants
-            $livePids = (Get-Process -ErrorAction SilentlyContinue).Id
-            $desc | Where-Object { $livePids -contains $_.ProcessId }
-        }
-
-        if (-not (Test-Path -LiteralPath $ExePath)) {
-            throw "SoftPaq not found: $ExePath"
-        }
-        if (-not (Test-Path -LiteralPath $DestDir)) {
-            $null = New-Item -ItemType Directory -Path $DestDir -Force
-        }
-
-        # Ensure patterns are strings and support wildcards; case-insensitive matching later via -ilike
-        $script:ChildNameSet = @(
-            '7z.exe','7za.exe','7zip.exe',
-            'setup.exe','dpinst.exe','msiexec.exe',
-            'installshield*','isscript*',
-            'hpsilentinstall.exe','hp*.exe','sp*.exe'
-        ) + ($ExtraChildNames | ForEach-Object { [string]$_ })
-    }
-
-    process {
-        function Invoke-And-Wait {
-            param(
-                [Parameter(Mandatory=$true)][string]$FilePath,
-                [Parameter(Mandatory=$true)][string[]]$Args,
-                [int]$Timeout = 600
-            )
-
-            Log "Launching: `"$FilePath`" $($Args -join ' ')" 'INFO'
-            $proc = Start-Process -FilePath $FilePath -ArgumentList $Args -PassThru -WindowStyle Hidden -ErrorAction Stop
-
-            $deadline  = (Get-Date).AddSeconds($Timeout)
-            $parentPid = $proc.Id
-
-            # 1) Wait for parent to exit (bounded by timeout)
-            try {
-                $remaining = [int][math]::Max(1, ($deadline - (Get-Date)).TotalSeconds)
-                Wait-Process -Id $parentPid -Timeout $remaining -ErrorAction Stop
-            } catch {
-                Log "Parent process (PID $parentPid) exceeded timeout while running." 'WARN'
-            }
-
-            # 2) Then wait for descendants to finish
-            $sleepMs  = 250
-            $sleepMax = 1500
-
-            while ($true) {
-                if ((Get-Date) -ge $deadline) {
-                    Log "Timeout waiting for child processes of PID $parentPid" 'WARN'
-                    break
-                }
-
-                $desc = Get-DescendantProcesses -RootPid $parentPid
-
-                # Filter descendants by watched names (case-insensitive, wildcard-aware)
-                $watched = @()
-                if ($desc.Count -gt 0) {
-                    $watched = $desc | Where-Object {
-                        $n = [string]$_.Name
-                        foreach ($pattern in $script:ChildNameSet) {
-                            if ($n -ilike ([string]$pattern)) { return $true }
-                        }
-                        $false
-                    }
-                }
-
-                # If any descendants exist at all, or any match our watched list, keep waiting
-                if ($desc.Count -gt 0 -or $watched.Count -gt 0) {
-                    Start-Sleep -Milliseconds $sleepMs
-                    $sleepMs = [int][math]::Min($sleepMs + 250, $sleepMax)
-                    continue
-                }
-
-                break
-            }
-
-            # Return exit code if available
-            $exitCode = $null
-            try { $exitCode = $proc.ExitCode } catch { }
-            return $exitCode
-        }
-
-        # Attempt 1: classic SoftPaq switches
-        $args1 = @('/e','/s','/f',"`"$DestDir`"")
-        $exit1 = Invoke-And-Wait -FilePath $ExePath -Args $args1 -Timeout $TimeoutSec
-
-        if ($exit1 -ne $null -and $exit1 -ne 0) {
-            Log "First attempt returned exit code $exit1. Retrying with alternate switch order." 'WARN'
-
-            # Attempt 2: alternate dash form
-            $args2 = @('-e','-s','-f',"`"$DestDir`"")
-            $exit2 = Invoke-And-Wait -FilePath $ExePath -Args $args2 -Timeout $TimeoutSec
-
-            if ($exit2 -ne $null -and $exit2 -ne 0) {
-                Log "Second attempt also returned exit code $exit2" 'WARN'
-            }
-        }
-
-        # Give disk a brief moment to flush; some extractors finish processes
-        # slightly before all files are visible.
-        $finalWaitMs = 0
-        while ($finalWaitMs -lt 3000) {
-            if (Test-Path -LiteralPath $DestDir) {
-                $items = Get-ChildItem -LiteralPath $DestDir -Recurse -ErrorAction SilentlyContinue
-                if ($items) { break }
-            }
-            Start-Sleep -Milliseconds 200
-            $finalWaitMs += 200
-        }
-
-        # Post-check: look for any .inf to hint that driver payload is present
-        $inf = Get-ChildItem -Path $DestDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $inf) {
-            Log "Warning: No INF found—extraction may have nested folders or a non-driver payload. Check $DestDir." 'WARN'
-        } else {
-            Log "Extraction looks OK. Found INF: $($inf.FullName)" 'INFO'
-        }
-    }
-}
-
-function Rescan-Devices {
-    Log "Rescanning storage (diskpart)..."
-    $dp = Join-Path 'X:\' 'rescan.txt'
-    @("rescan","list disk","list volume") | Out-File -FilePath $dp -Encoding ascii -Force
-    try { diskpart /s $dp | Out-Null } catch { Log "diskpart rescan failed (continuing)" -Level 'WARN' }
-
-    try { & wpeutil UpdateBootInfo | Out-Null } catch {}
-    $pnp = Get-Command pnputil.exe -ErrorAction SilentlyContinue
-    if ($pnp) {
-        try { & pnputil.exe /scan-devices | Out-Null } catch {}
-    }
-}
 function Get-OsCatalogEntry {
     [CmdletBinding()]
     param(
-        # Catalog URL (your provided source)
-        [Parameter()]
-        [ValidateNotNullOrEmpty()]
-        [string] $CatalogUri = 'https://raw.githubusercontent.com/OSDeploy/OSD/refs/heads/master/cache/os-catalogs/build-operatingsystems.xml',
-
-        # Constrained inputs as requested
-        [Parameter(Mandatory)]
-        [ValidateSet('Windows 11')]
-        [string] $OperatingSystem,
-
-        [Parameter(Mandatory)]
-        [ValidateSet('24H2','25H2','26H2')]
-        [string] $ReleaseID,
-
-        [Parameter(Mandatory)]
-        [ValidateSet('arm64','amd64')]
-        [string] $Architecture,
-
-        [Parameter(Mandatory)]
-        [ValidateSet('en-us')]
-        [string] $LanguageCode,
-
-        [Parameter(Mandatory)]
-        [ValidateSet('Volume')]
-        [string] $License
+        [Parameter()][string] $CatalogUri,
+        [Parameter(Mandatory)][ValidateSet('Windows 11')] [string] $OperatingSystem,
+        [Parameter(Mandatory)][ValidateSet('24H2','25H2','26H2')] [string] $ReleaseId,
+        [Parameter(Mandatory)][ValidateSet('arm64','amd64')] [string] $Architecture,
+        [Parameter(Mandatory)][ValidateSet('en-us')] [string] $LanguageCode,
+        [Parameter(Mandatory)][ValidateSet('Volume')] [string] $License
     )
 
-    # --- WinPE networking hardening: enable TLS 1.2 for GitHub raw ---
+    Enable-Tls12
+    Write-Status -Level STEP -Message "Fetching OS catalog"
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("os-catalog_{0}.xml" -f ([guid]::NewGuid()))
     try {
-        [Net.ServicePointManager]::SecurityProtocol =
-            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    } catch { }
-
-    # --- Helper: normalize Sha1 (Nil -> empty string) ---
-    function _Normalize-Sha1([object]$value) {
-        if ($null -eq $value) { return '' }
-        $s = [string]$value
-        if ([string]::IsNullOrWhiteSpace($s)) { return '' }
-        return $s
+        Invoke-WebRequest -Uri $CatalogUri -UseBasicParsing -OutFile $tmp -ErrorAction Stop
+    } catch {
+        throw "Failed to download catalog '$CatalogUri'. $($_.Exception.Message)"
     }
 
-    # --- Helper: safe version conversion for Build like "26200.7623" ---
-    function _To-Version([object]$build) {
-        $s = [string]$build
-        if ([string]::IsNullOrWhiteSpace($s)) {
-            return [version]'0.0'
-        }
+    # Try CLIXML first, then raw XML
+    $entries = $null
+    try {
+        $entries = Import-Clixml -Path $tmp -ErrorAction Stop
+    } catch {
         try {
-            # System.Version supports "major.minor[.build[.revision]]" as integers
-            return [version]$s
+            [xml]$xml = Get-Content -LiteralPath $tmp -Raw
+            # The OSD catalog often serializes entries under root; normalize to PSCustomObjects
+            $entries = @()
+            $nodes = $xml.SelectNodes('//Object') # fallback for CLIXML-like; else map common fields
+            if ($nodes -and $nodes.Count -gt 0) {
+                # Attempt generic projection
+                foreach ($n in $nodes) {
+                    $props = @{}
+                    foreach ($p in $n.Property) { $props[$p.Name] = $p.InnerText }
+                    $entries += New-Object psobject -Property $props
+                }
+            } else {
+                # Try a simple schema guess
+                $items = $xml.SelectNodes('//*')
+                throw "Unsupported XML structure. Update parser for this catalog."
+            }
         } catch {
-            # Fallback: split on dot and pad/truncate
+            throw "Unable to parse catalog as CLIXML or XML. $($_.Exception.Message)"
+        }
+    } finally {
+        try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+    }
+
+    if (-not $entries) { throw "Catalog contained no entries." }
+
+    # Normalize field names/dynamic properties for filtering
+    $filtered = $entries | Where-Object {
+        ($_.OperatingSystem -eq $OperatingSystem) -and
+        ($_.ReleaseId -eq $ReleaseId) -and
+        ($_.Architecture -eq $Architecture) -and
+        ($_.LanguageCode -eq $LanguageCode) -and
+        ($_.License -eq $License)
+    }
+
+    if (-not $filtered) { return $null }
+
+    function _ToVersion([object]$v) {
+        $s = [string]$v
+        if ([string]::IsNullOrWhiteSpace($s)) { return [version]'0.0' }
+        try { return [version]$s } catch {
             $parts = ($s -split '\.') | ForEach-Object { ($_ -as [int]) }
             if ($parts.Count -lt 2) { $parts += 0 }
             return New-Object System.Version ($parts[0]),($parts[1])
         }
     }
 
-    # --- Fetch and load catalog via Import-Clixml (PS 5.1 compatible) ---
-    $entries = $null
-    $tmp = $null
-    try {
-        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("os-catalog_{0}.xml" -f ([guid]::NewGuid().ToString()))
-        Invoke-WebRequest -Uri $CatalogUri -UseBasicParsing -OutFile $tmp -ErrorAction Stop
-        $entries = Import-Clixml -Path $tmp
-    } catch {
-        throw "Failed to load catalog from '$CatalogUri'. $_"
-    } finally {
-        if ($tmp -and (Test-Path $tmp)) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
-    }
+    $latest = $filtered | Sort-Object -Descending -Property @{Expression = { _ToVersion $_.Build } } | Select-Object -First 1
 
-    if (-not $entries) {
-        throw "Catalog contained no entries."
-    }
-
-    # --- Filter: exact, case-insensitive matches ---
-    $filtered = $entries | Where-Object {
-        ($_.OperatingSystem -eq $OperatingSystem) -and
-        ($_.ReleaseId       -eq $ReleaseID) -and
-        ($_.Architecture    -eq $Architecture) -and
-        ($_.LanguageCode    -eq $LanguageCode) -and
-        ($_.License         -eq $License)
-    }
-
-    if (-not $filtered) {
-        # Nothing matched; return $null to make it easy to test
-        return $null
-    }
-
-    # --- If multiple, pick the latest by Build ---
-    $latest = $filtered |
-        Sort-Object -Descending -Property @{ Expression = { _To-Version $_.Build } } |
-        Select-Object -First 1
-
-    # --- Project to required fields ---
+    # Return concise object
     [pscustomobject]@{
-        ESDUrl = $latest.Url
-        Sha1      = _Normalize-Sha1 $latest.Sha1
-        Sha256    = $latest.Sha256
+        ESDUrl  = $latest.Url
+        Sha1    = ([string]::IsNullOrWhiteSpace([string]$latest.Sha1)   ? '' : [string]$latest.Sha1)
+        Sha256  = ([string]::IsNullOrWhiteSpace([string]$latest.Sha256) ? '' : [string]$latest.Sha256)
     }
 }
+
 function Save-OsFile {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string] $Url,
-
-        [Parameter()]
+        [Parameter(Mandatory)][string] $Url,
         [string] $Sha1Hash,
-
-        [Parameter()]
         [string] $Sha256Hash,
-
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string] $Destination
+        [Parameter(Mandatory)][string] $Destination
     )
 
-    # Enable TLS 1.2 (common requirement for modern endpoints)
-    try {
-        [Net.ServicePointManager]::SecurityProtocol =
-            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    } catch { }
-
-    # Normalize inputs: trim and remove accidental whitespace within URL
-    $Url = $Url.Trim()
-    $cleanUrl = ($Url -replace '\s','')
-
-    $Sha1Hash   = if ($Sha1Hash)   { ($Sha1Hash   -replace '\s','').ToLowerInvariant() } else { $null }
-    $Sha256Hash = if ($Sha256Hash) { ($Sha256Hash -replace '\s','').ToLowerInvariant() } else { $null }
-
-    # Ensure destination exists
+    Enable-Tls12
     if (-not (Test-Path -LiteralPath $Destination)) {
         New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     }
 
-    # Target path from URL leaf
+    $cleanUrl = ($Url.Trim() -replace '\s','')
+    $Sha1Hash   = if ($Sha1Hash)   { ($Sha1Hash   -replace '\s','').ToLowerInvariant() } else { $null }
+    $Sha256Hash = if ($Sha256Hash) { ($Sha256Hash -replace '\s','').ToLowerInvariant() } else { $null }
+
     try {
         $uri = [Uri]$cleanUrl
         $fileName = [IO.Path]::GetFileName($uri.LocalPath)
-        if ([string]::IsNullOrWhiteSpace($fileName)) {
-            throw "Could not derive a filename from Url."
-        }
+        if ([string]::IsNullOrWhiteSpace($fileName)) { throw "Could not derive filename from URL." }
         $targetPath = Join-Path -Path $Destination -ChildPath $fileName
     } catch {
-        throw "Failed to determine target path from Url '$Url'. $_"
+        throw "Invalid URL '$Url'. $($_.Exception.Message)"
     }
 
-    $downloaded = $false
-
-    # If file does not exist, download; otherwise skip download
     if (-not (Test-Path -LiteralPath $targetPath)) {
-        # Prefer curl.exe for performance if available; fallback to Invoke-WebRequest
-        $curlPath = Join-Path $env:WINDIR 'System32\curl.exe'
-        if (Test-Path -LiteralPath $curlPath) {
-            # Build curl arguments safely; handle spaces in paths and URL
-            $curlArgs = @(
-                '--fail'               # return non-zero on HTTP errors
-                '--location'           # follow redirects
-                '--silent'             # no progress
-                '--show-error'         # but still print errors
-                '--connect-timeout', '30'
-                '--output', $targetPath
-                $cleanUrl
-            )
-
-            try {
-                # Invoke curl and capture stderr/stdout
-                $null = & $curlPath @curlArgs 2>&1 | Out-String
-                if ($LASTEXITCODE -ne 0) {
-                    # Clean up incomplete file if curl failed and left a stub
-                    if (Test-Path -LiteralPath $targetPath) {
-                        try { Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue } catch { }
-                    }
-                    throw "curl.exe download failed with exit code $LASTEXITCODE for '$cleanUrl' -> '$targetPath'."
-                }
-                $downloaded = $true
-            } catch {
-                throw "Download failed from '$cleanUrl' to '$targetPath' via curl.exe. $_"
+        Write-Status -Level STEP -Message "Downloading OS image"
+        $curl = Resolve-Curl
+        if ($curl) {
+            & $curl --fail --location --silent --show-error --connect-timeout 30 --output $targetPath $cleanUrl
+            if ($LASTEXITCODE -ne 0) {
+                if (Test-Path -LiteralPath $targetPath) { Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue }
+                throw "curl.exe failed with exit code $LASTEXITCODE for '$cleanUrl'."
             }
+        } else {
+            Invoke-WebRequest -Uri $cleanUrl -UseBasicParsing -OutFile $targetPath -ErrorAction Stop
         }
-        else {
-            try {
-                Invoke-WebRequest -Uri $cleanUrl -UseBasicParsing -OutFile $targetPath -ErrorAction Stop
-                $downloaded = $true
-            } catch {
-                throw "Download failed from '$cleanUrl' to '$targetPath'. $_"
-            }
-        }
+    } else {
+        Write-Status -Level INFO -Message "Using existing OS image: $targetPath"
     }
-
-    # Hash only if requested
-    $actualSha1   = $null
-    $actualSha256 = $null
 
     if ($Sha1Hash) {
-        $actualSha1 = (Get-FileHash -Algorithm SHA1 -Path $targetPath -ErrorAction Stop).Hash.ToLowerInvariant()
-        if ($actualSha1 -ne $Sha1Hash) {
-            throw "SHA1 mismatch for '$targetPath'. Expected: $Sha1Hash  Actual: $actualSha1"
-        }
+        $actual = (Get-FileHash -Algorithm SHA1 -Path $targetPath).Hash.ToLowerInvariant()
+        if ($actual -ne $Sha1Hash) { throw "SHA1 mismatch for '$targetPath'." }
     }
-
     if ($Sha256Hash) {
-        $actualSha256 = (Get-FileHash -Algorithm SHA256 -Path $targetPath -ErrorAction Stop).Hash.ToLowerInvariant()
-        if ($actualSha256 -ne $Sha256Hash) {
-            throw "SHA256 mismatch for '$targetPath'. Expected: $Sha256Hash  Actual: $actualSha256"
-        }
+        $actual2 = (Get-FileHash -Algorithm SHA256 -Path $targetPath).Hash.ToLowerInvariant()
+        if ($actual2 -ne $Sha256Hash) { throw "SHA256 mismatch for '$targetPath'." }
     }
 
-    # Return concise result
-    $fi = Get-Item -LiteralPath $targetPath -ErrorAction SilentlyContinue
+    $fi = Get-Item -LiteralPath $targetPath
     [pscustomobject]@{
         Path           = $targetPath
-        Bytes          = if ($fi) { $fi.Length } else { $null }
-        Downloaded     = $downloaded
-        VerifiedSHA1   = if ($Sha1Hash)   { $actualSha1 }   else { '' }
-        VerifiedSHA256 = if ($Sha256Hash) { $actualSha256 } else { '' }
-        Verified       = @(
-                            -not $Sha1Hash   -or ($actualSha1   -eq $Sha1Hash)
-                            -not $Sha256Hash -or ($actualSha256 -eq $Sha256Hash)
-                          ) -notcontains $false
+        Bytes          = $fi.Length
+        VerifiedSHA1   = ($Sha1Hash   ? $Sha1Hash   : '')
+        VerifiedSHA256 = ($Sha256Hash ? $Sha256Hash : '')
+        Verified       = $true
     }
 }
+
+# ---------------------------------------------------------------------------
+# IMAGE APPLY + BOOT INIT
+# ---------------------------------------------------------------------------
+
 function Apply-OsImage {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
-        [string] $ImagePath,
-
-        [Parameter(Mandatory)]
-        [string] $Name,
-
-        [Parameter(Mandatory)]
-        [string] $DestinationVolume
+        [Parameter(Mandatory)][string] $ImagePath,
+        [Parameter(Mandatory)][int] $Index,
+        [Parameter(Mandatory)][string] $DestinationVolume
     )
 
-    # Validate image exists
-    if (-not (Test-Path -LiteralPath $ImagePath)) {
-        throw "ImagePath not found: $ImagePath"
-    }
-
-    # Ensure destination exists
+    if (-not (Test-Path -LiteralPath $ImagePath)) { throw "Image not found: $ImagePath" }
     if (-not (Test-Path -LiteralPath $DestinationVolume)) {
         New-Item -ItemType Directory -Path $DestinationVolume -Force | Out-Null
     }
 
-    # Query available images
-    $images = Get-WindowsImage -ImagePath $ImagePath -ErrorAction Stop
-
-    if (-not $images) {
-        throw "No images found in: $ImagePath"
+    Write-Status -Level STEP -Message "Querying image metadata"
+    $images = Get-WindowsImage -ImagePath $ImagePath
+    if (-not $images) { throw "No images in: $ImagePath" }
+    $selected = $images | Where-Object { $_.ImageIndex -eq $Index } | Select-Object -First 1
+    if (-not $selected) {
+        $available = ($images | Select-Object -ExpandProperty ImageIndex) -join ', '
+        throw "Image index $Index not found. Available indices: $available"
     }
 
-    # Find matching image by name (case-insensitive)
-    $match = $images | Where-Object {
-        $_.ImageName -eq $Name -or
-        $_.ImageName.ToLower() -eq $Name.ToLower()
-    }
+    Write-Status -Level STEP -Message ("Applying image index {0} ({1}) to {2}" -f $selected.ImageIndex, $selected.ImageName, $DestinationVolume)
+    Expand-WindowsImage -ImagePath $ImagePath -Index $selected.ImageIndex -ApplyPath $DestinationVolume -ErrorAction Stop | Out-Null
 
-    if (-not $match) {
-        $available = ($images.ImageName -join ', ')
-        throw "No image named '$Name'. Available images: $available"
-    }
-
-    # Pick the highest index if multiple entries match
-    $selected = $match | Sort-Object ImageIndex -Descending | Select-Object -First 1
-    $index = $selected.ImageIndex
-
-    Write-Host "Applying image index $index ($Name) to $DestinationVolume..."
-
-    # Apply using DISM's Expand-WindowsImage
-    Expand-WindowsImage `
-        -ImagePath $ImagePath `
-        -Index $index `
-        -ApplyPath $DestinationVolume `
-        -ErrorAction Stop
-
-    return [pscustomobject]@{
+    [pscustomobject]@{
         ImagePath         = $ImagePath
         AppliedImageName  = $selected.ImageName
-        AppliedImageIndex = $index
+        AppliedImageIndex = $selected.ImageIndex
         Destination       = $DestinationVolume
     }
 }
 
-# Run in WinPE (Admin)
 function Initialize-UefiBootAfterApply {
     [CmdletBinding()]
     param(
-        # The Windows you just applied with Expand-WindowsImage
-        [Parameter(Mandatory)]
-        [ValidateScript({ Test-Path $_ -PathType Container })]
-        [string] $WindowsPath,
-
-        # Preferred letter for temporary mount of ESP (if free)
+        [Parameter(Mandatory)][ValidateScript({ Test-Path $_ -PathType Container })][string] $WindowsPath,
         [string] $PreferredEspLetter = 'S',
-
-        # Pass-through extra bcdboot args if needed (e.g., "/l en-US")
-        [string] $BcdBootExtraArgs
+        [string] $BcdBootExtraArgs = ''
     )
 
-    # Normalize Windows path
     $win = (Resolve-Path -LiteralPath $WindowsPath).Path.TrimEnd('\')
     if (-not (Test-Path -LiteralPath (Join-Path $win 'System32'))) {
         throw "WindowsPath '$WindowsPath' doesn't look like a valid Windows directory."
     }
 
-    # Ensure bcdboot exists in WinPE
     $bcdboot = Join-Path $env:SystemRoot 'System32\bcdboot.exe'
-    if (-not (Test-Path -LiteralPath $bcdboot)) {
-        throw "bcdboot.exe not found at '$bcdboot'. Ensure you're in WinPE/Windows with bcdboot available."
-    }
+    if (-not (Test-Path -LiteralPath $bcdboot)) { throw "bcdboot.exe not found at '$bcdboot'." }
 
-    # Find the EFI System Partition (ESP) by GPT type
     $esp = Get-Partition -ErrorAction Stop |
            Where-Object { $_.GptType -eq '{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}' } |
-           Sort-Object -Property Size -Descending |
-           Select-Object -First 1
+           Sort-Object -Property Size -Descending | Select-Object -First 1
+    if (-not $esp) { throw "EFI System Partition (ESP) not found." }
 
-    if (-not $esp) {
-        throw "EFI System Partition (ESP) not found. Create and format it (FAT32) before running this."
-    }
-
-    # If the ESP has a letter, reuse; else temporarily assign one
     $existingLetter = ($esp | Get-Volume -ErrorAction SilentlyContinue).DriveLetter
     $tempLetter = $null
-    $espRoot = $null
-
     try {
-        if ($existingLetter) {
-            $espRoot = "$existingLetter`:"
-        } else {
+        $espRoot = if ($existingLetter) { "$existingLetter`:" } else {
             $used = (Get-Volume -ErrorAction SilentlyContinue).DriveLetter | Where-Object { $_ } | ForEach-Object { $_.ToUpper() }
             $letter = if ($used -notcontains $PreferredEspLetter.ToUpper()) { $PreferredEspLetter.ToUpper() }
                       else { (65..90 | ForEach-Object { [char]$_ } | Where-Object { $used -notcontains $_ })[0] }
             if (-not $letter) { throw "No free drive letter available to mount ESP." }
-
             $esp | Set-Partition -NewDriveLetter $letter -ErrorAction Stop
             $tempLetter = $letter
-            $espRoot = "$letter`:"
+            "$letter`:"
         }
 
-        Write-Host "Using ESP at $espRoot" -ForegroundColor Cyan
-
-        # Build bcdboot args (UEFI only)
+        Write-Status -Level INFO -Message "Using ESP at $espRoot"
         $args = @("$win", '/f', 'UEFI', '/s', $espRoot)
         if ($BcdBootExtraArgs) { $args += $BcdBootExtraArgs }
 
-        Write-Host "Running: bcdboot $($args -join ' ')" -ForegroundColor Yellow
+        Write-Status -Level STEP -Message "Running: bcdboot $($args -join ' ')"
         & $bcdboot @args
-        if ($LASTEXITCODE -ne 0) {
-            throw "bcdboot failed (UEFI) with exit code $LASTEXITCODE."
-        }
+        if ($LASTEXITCODE -ne 0) { throw "bcdboot failed with exit code $LASTEXITCODE." }
 
-        # Quick sanity: confirm the expected path exists on ESP
         $efiBoot = Join-Path $espRoot 'EFI\Microsoft\Boot\bootmgfw.efi'
-        if (-not (Test-Path -LiteralPath $efiBoot)) {
-            throw "Boot files not found at '$efiBoot' after bcdboot. Check ESP format and try again."
-        }
+        if (-not (Test-Path -LiteralPath $efiBoot)) { throw "Boot files not found at '$efiBoot' after bcdboot." }
 
-        Write-Host "UEFI boot initialized successfully." -ForegroundColor Green
-    }
-    finally {
-        # Remove temporary letter if we added it
+        Write-Status -Level SUCCESS -Message "UEFI boot initialized successfully."
+    } finally {
         if ($tempLetter) {
             try { $esp | Remove-PartitionAccessPath -AccessPath "$tempLetter`:" -ErrorAction SilentlyContinue } catch { }
         }
     }
 }
 
+# ---------------------------------------------------------------------------
+# DRIVERS (SoftPaq extraction + offline inject)
+# ---------------------------------------------------------------------------
+
+function Extract-SoftPaq {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $ExePath,
+        [Parameter(Mandatory)][string] $DestDir,
+        [int] $TimeoutSec = 600
+    )
+    if (-not (Test-Path -LiteralPath $ExePath)) { throw "SoftPaq not found: $ExePath" }
+    if (-not (Test-Path -LiteralPath $DestDir)) { New-Item -ItemType Directory -Path $DestDir -Force | Out-Null }
+
+    Write-Status -Level STEP -Message "Extracting SoftPaq to $DestDir"
+    $args = @('/e','/s','/f',"`"$DestDir`"")
+    $p = Start-Process -FilePath $ExePath -ArgumentList $args -PassThru -WindowStyle Hidden
+    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+        try { $p.Kill() } catch { }
+        throw "Extraction timed out after ${TimeoutSec}s."
+    }
+    if ($p.ExitCode -ne 0) {
+        Write-Status -Level WARN -Message "Extractor returned exit code $($p.ExitCode). Checking output anyway."
+    }
+
+    Start-Sleep -Milliseconds 500
+    $inf = Get-ChildItem -Path $DestDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($inf) {
+        Write-Status -Level SUCCESS -Message "Extraction OK. Found INF: $($inf.FullName)"
+    } else {
+        Write-Status -Level WARN -Message "No INF found—payload may be nested or non-driver."
+    }
+}
+
 function Install-OfflineDrivers {
-    <#
+<#
     .SYNOPSIS
-        Injects drivers into an offline Windows image by enumerating *.inf files first.
-
-    .DESCRIPTION
-        - Finds all *.inf files with Get-ChildItem (not using -Recurse on Add-WindowsDriver).
-        - Reports how many are found.
-        - Iterates each INF into Add-WindowsDriver for clearer progress & error visibility.
-        - Supports -ForceUnsigned, -WhatIf, and -Verbose.
-        - Returns a summary object.
-
-    .PARAMETER ImagePath
-        Path to the offline Windows image (mount directory). Example: C:\Mount\WinImage
-
-    .PARAMETER DriverRoot
-        Root folder containing extracted drivers. Example: C:\Drivers\Extracted
-
-    .PARAMETER ForceUnsigned
-        Allow installation of unsigned drivers.
-
-    .EXAMPLE
-        Install-OfflineDrivers -ImagePath 'C:\Mount\WinImage' -DriverRoot 'C:\Drivers\Extracted' -Verbose
-
-    .EXAMPLE
-        Install-OfflineDrivers -ImagePath 'C:\Mount\WinImage' -DriverRoot 'C:\Drivers\Extracted' -ForceUnsigned -WhatIf
-
-    .NOTES
-        Requires elevated PowerShell and the DISM/WindowsImage PowerShell tooling (Add-WindowsDriver).
-    #>
+        Injects drivers into an offline Windows image (one INF at a time for clarity).
+#>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     param(
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string] $ImagePath,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string] $DriverRoot,
-
+        [Parameter(Mandatory)][string] $ImagePath,     # e.g., C:\
+        [Parameter(Mandatory)][string] $DriverRoot,
         [switch] $ForceUnsigned
     )
-
-    Begin {
-        Write-Verbose "Validating paths and environment..."
-
-        if (-not (Test-Path -Path $ImagePath -PathType Container)) {
-            throw "ImagePath '$ImagePath' is not a valid folder (expected an offline mounted image directory)."
-        }
-        if (-not (Test-Path -Path $DriverRoot -PathType Container)) {
-            throw "DriverRoot '$DriverRoot' is not a valid folder."
-        }
-
-        if (-not (Get-Command Add-WindowsDriver -ErrorAction SilentlyContinue)) {
-            throw "Add-WindowsDriver cmdlet not found. Run in an elevated PowerShell with Windows ADK/Deployment tools or ensure the DISM PowerShell module is available."
-        }
-
-        Write-Verbose "Environment OK. ImagePath='$ImagePath'; DriverRoot='$DriverRoot'; ForceUnsigned=$($ForceUnsigned.IsPresent)"
+    if (-not (Test-Path -Path $ImagePath -PathType Container)) { throw "ImagePath '$ImagePath' is not a valid folder." }
+    if (-not (Test-Path -Path $DriverRoot -PathType Container)) { throw "DriverRoot '$DriverRoot' is not a valid folder." }
+    if (-not (Get-Command Add-WindowsDriver -ErrorAction SilentlyContinue)) {
+        throw "Add-WindowsDriver not found. Ensure DISM PowerShell module is available."
     }
 
-    Process {
-        Write-Host "Scanning for driver INF files under: $DriverRoot" -ForegroundColor Cyan
+    Write-Status -Level STEP -Message "Scanning for driver INF files under: $DriverRoot"
+    $infs = Get-ChildItem -Path $DriverRoot -Filter *.inf -File -Recurse -ErrorAction SilentlyContinue
+    $count = $infs.Count
+    Write-Status -Level INFO -Message "Found $count driver INF file(s)."
+    if ($count -eq 0) {
+        return [pscustomobject]@{ ImagePath=$ImagePath; DriverRoot=$DriverRoot; DriversFound=0; Succeeded=0; Failed=0; Timestamp=(Get-Date) }
+    }
 
-        # Gather INF files once (instead of -Recurse with Add-WindowsDriver)
-        $driverInfs = Get-ChildItem -Path $DriverRoot -Filter *.inf -File -Recurse -ErrorAction SilentlyContinue
-        $driverCount = $driverInfs.Count
+    $ok = 0; $fail = 0; $i = 0; $activity = "Injecting drivers to $ImagePath"
+    foreach ($inf in $infs) {
+        $i++
+        Write-Progress -Activity $activity -Status ("[{0}/{1}] {2}" -f $i,$count,$inf.Name) -PercentComplete ([int](($i/$count)*100))
+        Write-Host ("[{0}/{1}] {2}" -f $i, $count, $inf.FullName) -ForegroundColor Yellow
 
-        Write-Host "Found $driverCount driver INF file(s)." -ForegroundColor Cyan
+        $params = @{ Path=$ImagePath; Driver=$inf.FullName; ErrorAction='Stop' }
+        if ($ForceUnsigned) { $params['ForceUnsigned'] = $true }
 
-        if ($driverCount -eq 0) {
-            Write-Warning "No INF files found. Nothing to do."
-            # Return an empty summary object for consistency
-            return [pscustomobject]@{
-                ImagePath    = $ImagePath
-                DriverRoot   = $DriverRoot
-                DriversFound = 0
-                Succeeded    = 0
-                Failed       = 0
-                Timestamp    = (Get-Date)
+        try {
+            if ($PSCmdlet.ShouldProcess($inf.FullName, "Add-WindowsDriver to '$ImagePath'")) {
+                Add-WindowsDriver @params | Out-Host
             }
+            Write-Host "   ✔ Success" -ForegroundColor Green
+            $ok++
+        } catch {
+            Write-Warning ("   ✖ Failed: {0}" -f $_.Exception.Message)
+            $fail++
         }
+    }
+    Write-Progress -Activity $activity -Completed -Status "Done"
 
-        $success   = 0
-        $failed    = 0
-        $processed = 0
-
-        # For progress bar tracking
-        $activity = "Installing drivers into offline image: $ImagePath"
-        $index    = 0
-
-        foreach ($inf in $driverInfs) {
-            $index++
-            $status = "[{0}/{1}] {2}" -f $index, $driverCount, $inf.Name
-            Write-Progress -Activity $activity -Status $status -PercentComplete ([int](($index / $driverCount) * 100))
-
-            $msg = "Injecting driver: $($inf.FullName)"
-            Write-Verbose $msg
-            Write-Host ("[{0}/{1}] {2}" -f $index, $driverCount, $inf.FullName) -ForegroundColor Yellow
-
-            # Build parameters for Add-WindowsDriver
-            $params = @{
-                Path        = $ImagePath
-                Driver      = $inf.FullName
-                ErrorAction = 'Stop'
-            }
-            if ($ForceUnsigned.IsPresent) { $params['ForceUnsigned'] = $true }
-
-            try {
-                if ($PSCmdlet.ShouldProcess($inf.FullName, "Add-WindowsDriver to '$ImagePath'")) {
-                    # Emit native output for good console visibility
-                    Add-WindowsDriver @params | Out-Host
-                }
-
-                Write-Host "   ✔ Success" -ForegroundColor Green
-                $success++
-            }
-            catch {
-                Write-Warning ("   ✖ Failed: {0}" -f $_.Exception.Message)
-                $failed++
-            }
-            finally {
-                $processed++
-            }
-        }
-
-        Write-Progress -Activity $activity -Completed -Status "Done"
-
-        # Summary to console
-        Write-Host ""
-        Write-Host "Completed." -ForegroundColor Cyan
-        Write-Host ("Drivers processed : {0}" -f $processed)
-        Write-Host ("Succeeded         : {0}" -f $success) -ForegroundColor Green
-        if ($failed -gt 0) {
-            Write-Host ("Failed            : {0}" -f $failed) -ForegroundColor Red
-        }
-
-        # Return a summary object (useful for pipelines/reporting)
-        [pscustomobject]@{
-            ImagePath    = $ImagePath
-            DriverRoot   = $DriverRoot
-            DriversFound = $driverCount
-            Succeeded    = $success
-            Failed       = $failed
-            Timestamp    = (Get-Date)
-        }
+    [pscustomobject]@{
+        ImagePath    = $ImagePath
+        DriverRoot   = $DriverRoot
+        DriversFound = $count
+        Succeeded    = $ok
+        Failed       = $fail
+        Timestamp    = (Get-Date)
     }
 }
 
-# ------------------ MAIN ------------------
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+
+Show-Banner
+$sys = Get-SystemInfo
+Write-Status -Level INFO -Message ("PowerShell: {0}, OS: {1}" -f $sys.PSVersion, $sys.OSCaption)
+Write-Status -Level INFO -Message "Source: https://github.com/CMMON112/BetaBareMetal/blob/main/Default.ps1"
+Write-Host ""
 
 try {
-    Log "Locating internal (non-USB) target disk..."
-    $disk = Get-InternalTargetDisk
-    Log ("Selected Disk {0} ({1} GB) Bus={2}" -f $disk.Number, [math]::Round($disk.Size/1GB), $disk.BusType)
+    # 1) Select Disk + Partition
+    $disk = Get-InternalTargetDisk -PreferredNumber $TargetDiskNumber
+    Write-Status -Level INFO -Message ("Selected Disk {0} ({1} GB) Bus={2}" -f $disk.Number, [math]::Round($disk.Size/1GB), $disk.BusType)
+    if (-not $SkipPartitioning) {
+        Prep-Disk-Win11Layout -DiskNumber $disk.Number
+    } else {
+        Write-Status -Level WARN -Message "Skipping partitioning per parameter."
+    }
 
-    Prep-Disk-Win11Layout -DiskNumber $disk.Number
-    Log "Done. C: formatted"
+    # 2) Resolve OS ESD (Catalog)
+    Write-Status -Level STEP -Message "Resolving OS payload from catalog"
+    $entry = Get-OsCatalogEntry -CatalogUri $CatalogUri -OperatingSystem $OperatingSystem -ReleaseId $ReleaseId -Architecture $Architecture -LanguageCode $LanguageCode -License $License
+    if (-not $entry) { throw "No catalog entry matched selection: $OperatingSystem $ReleaseId $Architecture $LanguageCode $License" }
+    Write-Status -Level INFO -Message "ESD URL resolved."
 
-    Write-Host "Success. You can proceed with imaging or disk operations." -ForegroundColor Green
-} catch {
-    Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    # 3) Download OS image
+    $os = Save-OsFile -Url $entry.ESDUrl -Sha1Hash $entry.Sha1 -Sha256Hash $entry.Sha256 -Destination $OsDownloadDir
+    Write-Status -Level SUCCESS -Message ("OS image ready: {0} ({1} bytes)" -f $os.Path, $os.Bytes)
+
+    # 4) Apply image to C:\
+    if (-not $SkipApplyImage) {
+        $apply = Apply-OsImage -ImagePath $os.Path -Index $ImageIndex -DestinationVolume 'C:\'
+        Write-Status -Level SUCCESS -Message ("Applied: {0} (Index {1})" -f $apply.AppliedImageName, $apply.AppliedImageIndex)
+    } else {
+        Write-Status -Level WARN -Message "Skipping image apply per parameter."
+    }
+
+    # 5) Drivers (optional SoftPaq)
+    if (-not $SkipDrivers -and $DriverSoftPaqUrl) {
+        $sku = Get-DeviceSkuName
+        $driversRoot = Join-Path 'C:\Drivers' $sku
+        if (-not (Test-Path -LiteralPath $driversRoot)) { New-Item -ItemType Directory -Path $driversRoot -Force | Out-Null }
+        Write-Status -Level INFO -Message "Drivers folder: $driversRoot"
+
+        $spPath = Join-Path $driversRoot ([IO.Path]::GetFileName([Uri]$DriverSoftPaqUrl).ToString())
+        Download-File -Url $DriverSoftPaqUrl -DestPath $spPath | Out-Null
+
+        $extractDir = Join-Path $driversRoot 'extracted'
+        Extract-SoftPaq -ExePath $spPath -DestDir $extractDir
+
+        Write-Status -Level STEP -Message "Injecting offline Drivers"
+        $summary = Install-OfflineDrivers -ImagePath "C:\" -DriverRoot $extractDir
+        Write-Status -Level INFO -Message ("Drivers: processed={0}, ok={1}, failed={2}" -f $summary.DriversFound, $summary.Succeeded, $summary.Failed)
+    } elseif ($SkipDrivers) {
+        Write-Status -Level WARN -Message "Skipping driver injection per parameter."
+    } else {
+        Write-Status -Level INFO -Message "No DriverSoftPaqUrl provided; skipping drivers."
+    }
+
+    # 6) Boot initialization
+    if (-not $SkipBootInit) {
+        Write-Status -Level STEP -Message "Initializing UEFI boot"
+        Initialize-UefiBootAfterApply -WindowsPath 'C:\Windows' -BcdBootExtraArgs $BcdBootExtraArgs
+    } else {
+        Write-Status -Level WARN -Message "Skipping boot initialization per parameter."
+    }
+
+    Write-Status -Level SUCCESS -Message "BuildForge init complete."
+    Write-Host ""
+    Write-Host ("Log: {0}" -f $script:LogPath) -ForegroundColor Cyan
+}
+catch {
+    Write-Status -Level ERROR -Message $_.Exception.Message
+    Write-Host ("Log: {0}" -f $script:LogPath) -ForegroundColor Cyan
     exit 1
 }
-Log "Looking for Windows image"
-$matches = Get-OsCatalogEntry -OperatingSystem 'Windows 11' -ReleaseID '25H2' -Architecture 'amd64' -LanguageCode 'en-us' -License 'Volume'
-$matches | Format-List
-Write-Host "Success. Starting download" -ForegroundColor Green
-$OSESD = Save-OsFile -Url $matches.ESDUrl -Sha1Hash $matches.Sha1 -Sha256Hash $matches.Sha256 -Destination C:\BuildOSD
-Expand-WindowsImage -ImagePath $OSESD.Path -Index 6 -ApplyPath "C:\"
-$sku = Get-DeviceSkuName
-    $driversRoot = Join-Path 'C:\Drivers' $sku
-    if (-not (Test-Path -LiteralPath $driversRoot)) { New-Item -ItemType Directory -Path $driversRoot -Force | Out-Null }
-    Log "Drivers folder: $driversRoot"
-
-    $url = 'https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe'
-    $dlPath = Join-Path $driversRoot 'sp160195.exe'
-    Download-File -Url $url -DestPath $dlPath
-
-    $extractDir = Join-Path $driversRoot 'extracted'
-    Extract-SoftPaq -ExePath $dlPath -DestDir $extractDir
-
-Write-host "Injecting offline Drivers"
-Install-OfflineDrivers -ImagePath "C:\" -DriverRoot $extractDir
-Write-host "fixing boot mgr and enabling boot"
-Initialize-UefiBootAfterApply -WindowsPath C:\Windows
-    Log "Done. C: formatted, drivers injected."
-
-
