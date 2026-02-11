@@ -1,24 +1,49 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<ProductMappings>
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
+  <Obj RefId="0">
+    <TN RefId="0">
+      <T>System.Management.Automation.PSCustomObject</T>
+      <T>System.Object</T>
+    </TN>
+    <MS>
+      <S N="CSManufacturer">HP</S>
+      <S N="CSModel">HP Elite x360 1040 14 inch G10 2-in-1 Notebook PC</S>
+      <S N="BBManufacturer">HP</S>
+      <Nil N="BBModel" />
+      <Nil N="BBSKU" />
+      <S N="BBProduct">8B41</S>
+      <S N="URL">https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe</S>
+      <Nil N="Sha1" />
+      <Nil N="Sha256" />
+    </MS>
+  </Obj>
 
-    <ProductMapping>
-        <CSManufacturer>HP</CSManufacturer>
-        <CSModel>HP Elite x360 1040 14 inch G10 2-in-1 Notebook PC</CSModel>
-        <BBManufacturer>HP</BBManufacturer>
-        <BBModel></BBModel>
-        <BBSKU></BBSKU>
-        <BBProduct>8B41</BBProduct>
-        <DriverURL>https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe</DriverURL>
-    </ProductMapping>
+  <Obj RefId="1">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="CSManufacturer">DummyCorp</S>
+      <S N="CSModel">Model-X</S>
+      <S N="BBManufacturer">DummyCorp</S>
+      <Nil N="BBModel" />
+      <Nil N="BBSKU" />
+      <S N="BBProduct">0000</S>
+      <Nil N="URL" />
+      <Nil N="Sha1" />
+      <Nil N="Sha256" />
+    </MS>
+  </Obj>
 
-    <ProductMapping>
-        <CSManufacturer>Fabrikam</CSManufacturer>
-        <CSModel></CSModel> <!-- NULL -->
-        <BBManufacturer>BlueBox</BBManufacturer>
-        <BBModel></BBModel> <!-- NULL -->
-        <BBSKU>SKU-22222</BBSKU>
-        <BBProduct>Lite Gadget</BBProduct>
-        <DriverURL></DriverURL> <!-- NULL -->
-    </ProductMapping>
-
-</ProductMappings>
+  <Obj RefId="2">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="CSManufacturer">Placeholder Inc</S>
+      <S N="CSModel">Prototype-Unit</S>
+      <S N="BBManufacturer">Placeholder Inc</S>
+      <Nil N="BBModel" />
+      <Nil N="BBSKU" />
+      <S N="BBProduct">XXXX</S>
+      <Nil N="URL" />
+      <Nil N="Sha1" />
+      <Nil N="Sha256" />
+    </MS>
+  </Obj>
+</Objs>
