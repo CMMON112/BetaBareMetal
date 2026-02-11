@@ -343,10 +343,90 @@ function New-UEFIPartitionLayout {
     & diskpart /s $temp | Out-String | ForEach-Object { Write-Info $_.TrimEnd() }
 }
 
-# ---------------------------
-# Catalog Handling (your existing Get-Catalog / Resolve-OsCatalogEntry assumed)
-# Keep using your existing functions here.
-# ---------------------------
+function Get-EntryValue {
+    param(
+        [Parameter(Mandatory)] $Obj,
+        [Parameter(Mandatory)] [string[]] $Names
+    )
+    foreach ($n in $Names) {
+        $p = $Obj.PSObject.Properties[$n]
+        if ($p -and -not [string]::IsNullOrWhiteSpace([string]$p.Value)) {
+            return [string]$p.Value
+        }
+    }
+    return $null
+}
+
+function Get-Catalog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$CatalogUrl
+    )
+
+    # Ensure we have a usable temp root even on reruns after diskpart
+    if (-not $script:TempRoot) { $script:TempRoot = Get-TempRoot }
+
+    # Prefer W:\BuildForge\Cache if W: exists (big downloads)
+    $cacheRoot = (Get-CacheRoot)
+    if (-not (Test-Path -LiteralPath $cacheRoot)) { New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null }
+
+    # Use the URL leaf name as the file name (fallback if needed)
+    $leaf = "catalog.clixml"
+    try {
+        $uri = [Uri]$CatalogUrl
+        $leaf = [IO.Path]::GetFileName($uri.AbsolutePath)
+        if ([string]::IsNullOrWhiteSpace($leaf)) { $leaf = "catalog.clixml" }
+    } catch { }
+
+    $localPath = Join-Path $cacheRoot $leaf
+
+    Write-Info ("Downloading catalog: {0}" -f $CatalogUrl)
+    Invoke-FileDownload -Url $CatalogUrl -DestPath $localPath -Retries 2 | Out-Null
+
+    Write-Info ("Importing catalog: {0}" -f $localPath)
+
+    try {
+        return Import-Clixml -Path $localPath
+    } catch {
+        throw "Get-Catalog: Failed to Import-Clixml '$localPath'. If this file is real XML (not CLIXML), the parser must be changed."
+    }
+}
+
+function Resolve-OsCatalogEntry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Catalog,
+        [Parameter(Mandatory)][string] $OperatingSystem,
+        [Parameter(Mandatory)][string] $ReleaseId,
+        [Parameter(Mandatory)][string] $Architecture,
+        [Parameter(Mandatory)][string] $LanguageCode,
+        [Parameter(Mandatory)][string] $License
+    )
+
+    if (-not $Catalog) { throw "Resolve-OsCatalogEntry: Catalog is empty." }
+
+    # Catalog might be a single object or array
+    $entries = @($Catalog)
+
+    $filtered = $entries | Where-Object {
+        ($_.OperatingSystem -eq $OperatingSystem) -and
+        ($_.ReleaseId       -eq $ReleaseId)       -and
+        ($_.Architecture    -eq $Architecture)    -and
+        ($_.LanguageCode    -eq $LanguageCode)    -and
+        ($_.License         -eq $License)
+    }
+
+    if (-not $filtered) {
+        throw "Resolve-OsCatalogEntry: No match for OS='$OperatingSystem' ReleaseId='$ReleaseId' Arch='$Architecture' Lang='$LanguageCode' License='$License'."
+    }
+
+    # Prefer newest build if property exists
+    if ($filtered[0].PSObject.Properties.Name -contains 'Build') {
+        return ($filtered | Sort-Object -Property Build -Descending | Select-Object -First 1)
+    }
+
+    return ($filtered | Select-Object -First 1)
+}
 
 # ---------------------------
 # Image selection & apply (no backtick continuations)
