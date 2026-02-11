@@ -23,7 +23,7 @@ param(
 
     # Optional targeting & rerun controls
     [int]    $TargetDiskNumber = -1,
-    [bool] $ForceRepartition = $true,
+    [switch] $ForceRepartition,
     [switch] $ForceRedownload,
     [switch] $ForceApplyImage
 )
@@ -438,7 +438,7 @@ function Get-TargetDisk {
 
 function Apply-UEFIPartitionLayout {
     [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][int]$DiskNumber, [int]$RecoveryMB=800, [int]$EfiMB=300)
+    param([Parameter(Mandatory)][int]$DiskNumber, [int]$RecoveryMB=500, [int]$EfiMB=200)
 
     $dp = @(
         "select disk $DiskNumber",
@@ -760,27 +760,27 @@ Invoke-Step "14) Select desired index (Windows 11 $SKU)" {
     Write-Log "Selected index: $index (SKU=$SKU)" 'OK'
 }
 
-Invoke-Step "15) Apply selected index to W:\" {
+Invoke-Step "15) Expand selected index to W:\" {
 
     $already = Test-Path -LiteralPath 'W:\Windows\System32'
     if ($already -and -not $ForceApplyImage) {
-        Write-Log "W:\Windows already present. Skipping apply-image (use -ForceApplyImage to reapply)." 'INFO'
+        Write-Log "W:\Windows already present. Skipping Expand-image (use -ForceApplyImage to reapply)." 'INFO'
         return
     }
 
     # Ensure DISM PowerShell cmdlets are available (PowerShell-only, no dism.exe)
-    if (-not (Get-Command -Name Apply-WindowsImage -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command -Name Expand-WindowsImage -ErrorAction SilentlyContinue)) {
         try {
             Import-Module Dism -ErrorAction Stop
         } catch {
-            throw "Apply-WindowsImage cmdlet not available (Dism module missing). Cannot apply image without dism.exe."
+            throw "Expand-WindowsImage cmdlet not available (Dism module missing). Cannot Expand image without dism.exe."
         }
     }
 
-    if ($PSCmdlet.ShouldProcess("W:\", "Apply-WindowsImage (Index $($script:SelectedIndex))")) {
+    if ($PSCmdlet.ShouldProcess("W:\", "Expand-WindowsImage (Index $($script:SelectedIndex))")) {
 
-        # Apply the selected index to W:\
-        Apply-WindowsImage -ImagePath $script:OsPath `
+        # Expand the selected index to W:\
+        Expand-WindowsImage -ImagePath $script:OsPath `
                            -Index $script:SelectedIndex `
                            -ApplyPath 'W:\' `
                            -ErrorAction Stop | Out-Null
