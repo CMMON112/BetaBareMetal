@@ -723,15 +723,12 @@ $result = Find-DriverPackMatch -Hardware $hw -DriverCatalog $driverCatalog
 
 if ($result.Matched) {
     Write-Output ("URL:    {0}" -f $result.URL)
+    Write-Output ("URL:    {0}" -f $result.URL)
 
-    $sha1 = if (-not [string]::IsNullOrWhiteSpace([string]$result.Sha1)) { $result.Sha1 } else { '<none>' }
-    $sha256 = if (-not [string]::IsNullOrWhiteSpace([string]$result.Sha256)) { $result.Sha256 } else { '<none>' }
-
-    Write-Output ("Sha1:   {0}" -f $sha1)
-    Write-Output ("Sha256: {0}" -f $sha256)
 }
 else {
     Write-Output $result.Reason
     $result.Candidates | Format-Table -AutoSize
 }
-$result | Format-List * | out-string | foreach-object {write-info $_.TrimEnd()}
+
+Write-host "$hardware"
