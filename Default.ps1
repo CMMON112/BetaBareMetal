@@ -200,8 +200,17 @@ function Invoke-Native {
     $stderr = $p.StandardError.ReadToEnd()
     $p.WaitForExit()
 
-    if ($stdout) { $stdout.TrimEnd() -split "`r?`n" | ForEach-Object { Write-Log $_ 'INFO' } }
-    if ($stderr) { $stderr.TrimEnd() -split "`r?`n" | ForEach-Object { Write-Log $_ 'WARN' } }
+    if ($stdout) {
+    $stdout -split "`r?`n" |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { Write-Log $_ 'INFO' }
+    }
+
+    if ($stderr) {
+    $stderr -split "`r?`n" |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { Write-Log $_ 'WARN' }
+    }
 
     if (-not $IgnoreExitCode -and $p.ExitCode -ne 0) {
         throw "Command failed (exit $($p.ExitCode)): $FilePath $($Arguments -join ' ')"
