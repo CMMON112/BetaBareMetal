@@ -1,24 +1,3 @@
-#Requires -Version 5.1
-<#
-.SYNOPSIS
-    Monash BuildForge – Bare Metal Init (WinRE / PS 5.1 compatible)
-
-.DESCRIPTION
-    Fully automated bare-metal Windows provisioning script.
-    Handles disk partitioning, OS image download + apply, driver injection,
-    and UEFI boot initialisation – all from WinPE/WinRE.
-
-    Steps:
-        1. Disk selection & GPT partitioning (ESP → MSR → Windows → Recovery)
-        2. OS catalog lookup + ESD download (with hash verification)
-        3. Image apply via DISM
-        4. SoftPaq driver download, extraction & offline injection
-        5. UEFI boot initialisation via bcdboot
-
-    Requires: WinPE/WinRE with DISM tools, bcdboot; network for catalog/ESD.
-    WARNING:  Destructive to the target disk.
-#>
-
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateSet('Windows 11')]
@@ -36,34 +15,108 @@ param(
     [ValidateSet('Volume')]
     [string] $License = 'Volume',
 
-    [int] $ImageIndex = 6,
+    [ValidateSet('Enterprise', 'Professional')]
+    [string] $SKU = 'Enterprise',
 
-    # Paths (now optional, will default to Windows volume:\BuildOSD)
-    [string] $OsDownloadDir = '',
-
-    # Target disk
-    [int] $TargetDiskNumber = -1,
-
-    # Drivers
-    [string] $DriverSoftPaqUrl = 'https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe',
-
-    # Skip flags
-    [switch] $SkipPartitioning,
-    [switch] $SkipApplyImage,
-    [switch] $SkipDrivers,
-    [switch] $SkipBootInit,
-
-    # Boot
-    [string] $BcdBootExtraArgs = '',
+    # Driver Catralog
+    [string] $DriverCatalogUrl = "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml",
 
     # OS Catalog
-    [string] $CatalogUri = 'https://raw.githubusercontent.com/OSDeploy/OSD/refs/heads/master/cache/os-catalogs/build-operatingsystems.xml'
+    [string] $OSCatalogUrl  = "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
 )
 
 $ErrorActionPreference = 'Stop'
 
+# ---- Step tracking (adjust TotalSteps as you build out the workflow) ----
 $script:CurrentStep = 0
 $script:TotalSteps  = 6
+
+# ---------------------------
+# Helpers / Core Infrastructure
+# ---------------------------
+
+function Get-TempRoot {
+    $cTemp = 'C:\Windows\Temp\BuildForce'
+    $xTemp = 'X:\Windows\Temp\BuildForce'
+
+    # If C:\Windows exists, prefer C:\Windows\Temp\BuildForce
+    if (Test-Path -LiteralPath 'C:\Windows') {
+
+        # If X exists and C doesn't, migrate X -> C first (previously unreachable)
+        if ((Test-Path -LiteralPath $xTemp) -and -not (Test-Path -LiteralPath $cTemp)) {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $cTemp) -Force | Out-Null
+            Move-Item -LiteralPath $xTemp -Destination $cTemp -Force
+        }
+
+        # Ensure the C:\Windows\Temp\BuildForce directory exists
+        if (-not (Test-Path -LiteralPath $cTemp)) {
+            New-Item -ItemType Directory -Path $cTemp -Force | Out-Null
+        }
+
+        return $cTemp
+    }
+
+    # If C:\Windows does NOT exist, ensure X:\Windows\Temp\BuildForce exists
+    if (-not (Test-Path -LiteralPath $xTemp)) {
+        New-Item -ItemType Directory -Path $xTemp -Force | Out-Null
+    }
+
+    return $xTemp
+}
+
+# Core unified output + logging function
+function Write-Status {
+    param(
+        [string] $Message,
+        [ValidateSet('INFO','WARN','ERROR','SUCCESS','STEP')]
+        [string] $Level = 'INFO'
+    )
+
+    # Ensure temp root is always initialized before logging
+    if (-not $script:TempRoot) {
+        $script:TempRoot = Get-TempRoot
+    }
+
+    # Map log level → console prefix + color
+    switch ($Level) {
+        'INFO'    { $prefix = 'INFO';    $color = 'Gray' }
+        'WARN'    { $prefix = 'WARN';    $color = 'Yellow' }
+        'ERROR'   { $prefix = 'ERROR';   $color = 'Red' }
+        'SUCCESS' { $prefix = 'OK';      $color = 'Green' }
+        'STEP'    { $prefix = 'STEP';    $color = 'Cyan' }
+    }
+
+    # Console output
+    Write-Host ("  [{0}]    {1}" -f $prefix, $Message) -ForegroundColor $color
+
+    # Ensure log directory exists
+    if (-not (Test-Path -LiteralPath $script:TempRoot)) {
+        New-Item -ItemType Directory -Path $script:TempRoot -Force | Out-Null
+    }
+
+    # Log file path
+    $logFile = Join-Path $script:TempRoot 'BuildForce.log'
+
+    # Log entry
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    Add-Content -Path $logFile -Value "$timestamp [$Level] $Message"
+}
+
+# Convenience wrappers
+function Write-Info  { param([string] $Message) Write-Status -Message $Message -Level INFO }
+function Write-Warn  { param([string] $Message) Write-Status -Message $Message -Level WARN }
+function Write-Fail  { param([string] $Message) Write-Status -Message $Message -Level ERROR }
+function Write-Ok    { param([string] $Message) Write-Status -Message $Message -Level SUCCESS }
+
+function Write-Divider {
+    # Prevent double-console printing (was happening before when calling Write-Status inside)
+    $line = "─" * 72
+    Write-Host $line -ForegroundColor DarkGray
+    if (-not $script:TempRoot) { $script:TempRoot = Get-TempRoot }
+    $logFile = Join-Path $script:TempRoot 'BuildForce.log'
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    Add-Content -Path $logFile -Value "$timestamp [INFO] $line"
+}
 
 function Start-Step {
     param([string] $Description)
@@ -71,94 +124,28 @@ function Start-Step {
     Write-Divider
     Write-Host (" STEP {0} of {1}  –  {2}" -f $script:CurrentStep, $script:TotalSteps, $Description) -ForegroundColor Cyan
     Write-Divider
-    Write-Log -Message "=== STEP $($script:CurrentStep): $Description ===" -Level STEP
-}
-
-function Get-TempRoot {
-    if ($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)) { return $env:TEMP }
-    return 'X:\'
-}
-
-$script:LogPath = Join-Path (Get-TempRoot) ("BuildForge_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
-try {
-    $logDir = Split-Path -Path $script:LogPath -Parent
-    if (-not (Test-Path -LiteralPath $logDir)) {
-        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    }
-    New-Item -ItemType File -Path $script:LogPath -Force | Out-Null
-} catch { }
-
-function Write-Log {
-    param(
-        [Parameter(Mandatory)][string] $Message,
-        [ValidateSet('INFO', 'STEP', 'WARN', 'ERROR', 'SUCCESS')]
-        [string] $Level = 'INFO'
-    )
-    $line = "[{0:HH:mm:ss}] [{1,-7}] {2}" -f (Get-Date), $Level, $Message
-    try { Add-Content -Path $script:LogPath -Value $line -ErrorAction SilentlyContinue } catch { }
-}
-
-function Write-Info {
-    param([string] $Message)
-    Write-Host "  [INFO]    $Message" -ForegroundColor Gray
-    Write-Log   -Message $Message -Level INFO
-}
-
-function Write-Warn {
-    param([string] $Message)
-    Write-Host "  [WARN]    $Message" -ForegroundColor Yellow
-    Write-Log   -Message $Message -Level WARN
-}
-
-function Write-Fail {
-    param([string] $Message)
-    Write-Host "  [ERROR]   $Message" -ForegroundColor Red
-    Write-Log   -Message $Message -Level ERROR
-}
-
-function Write-Ok {
-    param([string] $Message)
-    Write-Host "  [OK]      $Message" -ForegroundColor Green
-    Write-Log   -Message $Message -Level SUCCESS
-}
-
-function Write-Divider {
-    Write-Host ("─" * 72) -ForegroundColor DarkGray
+    Write-Status -Message "=== STEP $($script:CurrentStep): $Description ===" -Level STEP
 }
 
 function Show-Banner {
     $banner = @"
-            ███╗   ███╗ ██████╗ ███╗   ██╗ █████╗ ███████╗██╗  ██╗                
-            ████╗ ████║██╔═══██╗████╗  ██║██╔══██╗██╔════╝██║  ██║                
-            ██╔████╔██║██║   ██║██╔██╗ ██║███████║███████╗███████║                
-            ██║╚██╔╝██║██║   ██║██║╚██╗██║██╔══██║╚════██║██╔══██║                
-            ██║ ╚═╝ ██║╚██████╔╝██║ ╚████║██║  ██║███████║██║  ██║                
-            ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝                
-                                                                                  
+            ███╗   ███╗ ██████╗ ███╗   ██╗ █████╗ ███████╗██╗  ██╗
+            ████╗ ████║██╔═══██╗████╗  ██║██╔══██╗██╔════╝██║  ██║
+            ██╔████╔██║██║   ██║██╔██╗ ██║███████║███████╗███████║
+            ██║╚██╔╝██║██║   ██║██║╚██╗██║██╔══██║╚════██║██╔══██║
+            ██║ ╚═╝ ██║╚██████╔╝██║ ╚████║██║  ██║███████║██║  ██║
+            ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
+
 ██████╗ ██╗   ██╗██╗██╗     ██████╗     ███████╗ ██████╗ ██████╗  ██████╗ ███████╗
 ██╔══██╗██║   ██║██║██║     ██╔══██╗    ██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝
-██████╔╝██║   ██║██║██║     ██║  ██║    █████╗  ██║   ██║██████╔╝██║  ███╗█████╗  
-██╔══██╗██║   ██║██║██║     ██║  ██║    ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  
+██████╔╝██║   ██║██║██║     ██║  ██║    █████╗  ██║   ██║██████╔╝██║  ███╗█████╗
+██╔══██╗██║   ██║██║██║     ██║  ██║    ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝
 ██████╔╝╚██████╔╝██║███████╗██████╔╝    ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗
 ╚═════╝  ╚═════╝ ╚═╝╚══════╝╚═════╝     ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 "@
     $banner -split "`r?`n" | ForEach-Object {
         Write-Host $_ -ForegroundColor Cyan
     }
-}
-
-function Show-CompletionSummary {
-    param([System.Collections.IDictionary] $Results)
-    Write-Host ""
-    Write-Divider
-    Write-Host "  BUILD COMPLETE" -ForegroundColor Green
-    Write-Divider
-    foreach ($key in $Results.Keys) {
-        Write-Host ("  {0,-30} {1}" -f "${key}:", $Results[$key]) -ForegroundColor White
-    }
-    Write-Divider
-    Write-Host ("  Log saved to: {0}" -f $script:LogPath) -ForegroundColor DarkCyan
-    Write-Host ""
 }
 
 function Get-SystemInfo {
@@ -197,6 +184,13 @@ function Invoke-FileDownload {
     )
 
     Enable-Tls12
+
+    # Ensure destination folder exists (curl and IWR both need it)
+    $parent = Split-Path -Parent $DestPath
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+
     $curl      = Resolve-CurlPath
     $attempts  = $Retries + 1
 
@@ -263,6 +257,74 @@ function Confirm-FileHash {
     }
 }
 
+# ---------------------------
+# Disk selection helpers
+# ---------------------------
+
+function Get-BestOSDisk {
+    # Weighting rules for disk types
+    $busTypePreference = @{
+        'NVMe'    = 1
+        'SSD'     = 2
+        'SATA'    = 3
+        'RAID'    = 4
+        'SAS'     = 5
+        'ATA'     = 6
+        'Unknown' = 10
+        'USB'     = 99
+        'SD'      = 99
+        'MMC'     = 99
+    }
+
+    # Get all internal-ish disks
+    $disks = Get-Disk | Where-Object {
+        $_.BusType -notin @('USB','SD','MMC')
+    }
+
+    if (-not $disks) {
+        throw "No suitable disks found."
+    }
+
+    # Add scoring metadata
+    $ranked = $disks | ForEach-Object {
+        $busScore = if ($busTypePreference.ContainsKey($_.BusType)) {
+            $busTypePreference[$_.BusType]
+        } else {
+            $busTypePreference['Unknown']
+        }
+
+        [PSCustomObject]@{
+            DiskNumber = $_.Number
+            Size       = $_.Size
+            BusType    = $_.BusType
+            IsBoot     = $_.IsBoot
+            IsSystem   = $_.IsSystem
+            BusScore   = $busScore
+        }
+    }
+
+    # Sort by:
+    # 1. Bus type preference (lower is better)
+    # 2. Non-boot disks first
+    # 3. Non-system disks first
+    # 4. Largest size
+    $best = $ranked |
+        Sort-Object `
+            BusScore,
+            IsBoot,
+            IsSystem,
+            @{Expression = 'Size'; Descending = $true} |
+        Select-Object -First 1
+
+    return $best.DiskNumber
+}
+
+function Find-BestInternalDisk {
+    $diskNumber = Get-BestOSDisk
+    if ($null -eq $diskNumber) { throw "No suitable internal disk found." }
+    return Get-Disk -Number $diskNumber -ErrorAction Stop
+}
+
 function Get-TargetDisk {
     param([int] $PreferredNumber = -1)
 
@@ -282,232 +344,123 @@ function Get-TargetDisk {
             Write-Warn "Disk $PreferredNumber is read-only – clearing that flag..."
             Set-Disk -Number $disk.Number -IsReadOnly:$false -ErrorAction Stop
         }
-        return $disk
+
+        return $disk  # ALWAYS return disk object
     }
 
     Write-Info "No disk number specified – scanning for the best candidate..."
-    return Find-BestInternalDisk
+    return Find-BestInternalDisk  # ALWAYS return disk object
 }
 
-function Find-BestInternalDisk {
-    $candidates = Get-Disk | Where-Object {
-        $_.BusType    -ne 'USB'  -and
-        -not $_.IsOffline        -and
-        -not $_.IsReadOnly       -and
-        -not $_.IsBoot           -and
-        -not $_.IsSystem
-    } | Sort-Object Size -Descending
-
-    if (-not $candidates) {
-        Write-Warn "No ready disks found. Attempting to bring offline disks online..."
-        Get-Disk | Where-Object { $_.BusType -ne 'USB' -and $_.IsOffline } | ForEach-Object {
-            try {
-                Set-Disk -Number $_.Number -IsOffline:$false -ErrorAction Stop
-                Write-Info "Disk $($_.Number) brought online."
-            } catch {
-                Write-Warn "Could not bring disk $($_.Number) online: $($_.Exception.Message)"
-            }
-        }
-
-        $candidates = Get-Disk | Where-Object {
-            $_.BusType    -ne 'USB'  -and
-            -not $_.IsOffline        -and
-            -not $_.IsReadOnly       -and
-            -not $_.IsBoot           -and
-            -not $_.IsSystem
-        } | Sort-Object Size -Descending
-    }
-
-    if (-not $candidates) {
-        throw "No suitable internal disk found. Ensure at least one non-USB, non-boot disk is attached."
-    }
-
-    $chosen = $candidates | Select-Object -First 1
-    Write-Info ("Found {0} candidate disk(s). Selected Disk {1} ({2} GB, BusType={3})." -f
-        @($candidates).Count, $chosen.Number, [math]::Round($chosen.Size / 1GB, 1), $chosen.BusType)
-    return $chosen
-}
-
-function Clear-AndInitializeDisk {
-    param([Parameter(Mandatory)] [int] $DiskNumber)
-
-    Write-Warn "!!! ALL DATA on Disk $DiskNumber will be permanently erased !!!"
-    Set-Disk  -Number $DiskNumber -IsReadOnly:$false -ErrorAction SilentlyContinue | Out-Null
-    Set-Disk  -Number $DiskNumber -IsOffline:$false  -ErrorAction SilentlyContinue | Out-Null
-    Clear-Disk -Number $DiskNumber -RemoveData -RemoveOEM -Confirm:$false
-    Initialize-Disk -Number $DiskNumber -PartitionStyle GPT
-    Write-Ok "Disk $DiskNumber cleared and initialised as GPT."
-}
-
-function New-EspPartition {
-    param([Parameter(Mandatory)] [int] $DiskNumber)
-
-    Write-Info "Creating EFI System Partition (ESP) – 100 MB, FAT32..."
-    $esp = New-Partition -DiskNumber $DiskNumber -Size 100MB `
-                         -GptType '{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}'
-    Format-Volume -Partition $esp -FileSystem FAT32 -NewFileSystemLabel 'System' `
-                  -Confirm:$false -Force | Out-Null
-    Write-Ok "ESP created."
-    return $esp
-}
-
-function New-MsrPartition {
-    param([Parameter(Mandatory)] [int] $DiskNumber)
-
-    Write-Info "Creating Microsoft Reserved Partition (MSR) – 16 MB..."
-    New-Partition -DiskNumber $DiskNumber -Size 16MB `
-                  -GptType '{E3C9E316-0B5C-4DB8-817D-F92DF00215AE}' | Out-Null
-    Write-Ok "MSR created."
-}
-
-function New-WindowsPartition {
-    <#
-        Creates the Windows partition using all remaining space.
-        Assigns drive letter W: (WinPE owns C:).
-        Returns the partition object.
-    #>
-    param([Parameter(Mandatory)] [int] $DiskNumber)
-
-    Write-Info "Creating Windows partition (max available size, NTFS)..."
-
-    $windows = New-Partition -DiskNumber $DiskNumber -UseMaximumSize `
-                              -GptType '{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}' `
-                              -AssignDriveLetter
-
-    Write-Info "Assigning Windows partition to W: (C: is reserved by WinPE)..."
-    Set-Partition -DiskNumber $windows.DiskNumber `
-                  -PartitionNumber $windows.PartitionNumber `
-                  -NewDriveLetter W | Out-Null
-
-    Format-Volume -DriveLetter W -FileSystem NTFS -NewFileSystemLabel 'Windows' `
-                  -Confirm:$false -Force | Out-Null
-
-    Write-Ok "Windows partition created and mounted as W:."
-    return Get-Partition -DiskNumber $DiskNumber -PartitionNumber $windows.PartitionNumber
-}
-
-function Resize-WindowsForRecovery {
+function New-UEFIPartitionLayout {
+    [CmdletBinding(SupportsShouldProcess)]
     param(
-        [Parameter(Mandatory)] [int] $DiskNumber,
-        [Parameter(Mandatory)] [int] $PartitionNumber,
-        [long] $ShrinkByBytes = 750MB
+        [Parameter(Mandatory)]
+        [int]$DiskNumber,
+
+        [int]$RecoverySizeMB = 500,
+        [int]$EfiSizeMB = 200
     )
 
-    $part       = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber
-    $supported  = Get-PartitionSupportedSize -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber
-    $targetSize = [math]::Max($supported.SizeMin, ($part.Size - $ShrinkByBytes))
+    $commands = @(
+        "select disk $DiskNumber",
+        "clean",
+        "convert gpt",
 
-    if ($targetSize -ge $part.Size) {
-        Write-Warn "Windows partition cannot be shrunk (disk too small?). Recovery will be skipped."
-        return $false
-    }
+        "create partition efi size=$EfiSizeMB",
+        "format quick fs=fat32 label=System",
+        "assign letter=S",
 
-    Write-Info ("Shrinking Windows partition by {0} MB..." -f [math]::Round($ShrinkByBytes / 1MB))
-    Resize-Partition -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber -Size $targetSize
-    Write-Ok "Windows partition resized."
-    return $true
-}
+        "create partition msr size=16",
 
-function New-RecoveryPartition {
-    param([Parameter(Mandatory)] [int] $DiskNumber)
+        "create partition primary",
+        "shrink minimum=$RecoverySizeMB",
+        "format quick fs=ntfs label=Windows",
+        "assign letter=W",
 
-    Write-Info "Creating Recovery partition – 750 MB, NTFS..."
-    try {
-        $recovery = New-Partition -DiskNumber $DiskNumber -UseMaximumSize `
-                                  -GptType '{DE94BBA4-06D1-4D40-A16A-BFD50179D6AC}'
-        Format-Volume -Partition $recovery -FileSystem NTFS -NewFileSystemLabel 'Recovery' `
-                      -Confirm:$false -Force | Out-Null
-        Write-Ok "Recovery partition created."
-    } catch {
-        Write-Warn "Recovery partition creation failed (non-fatal): $($_.Exception.Message)"
-    }
-}
+        "create partition primary",
+        "format quick fs=ntfs label=Recovery",
+        "assign letter=R",
+        'set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"',
+        "gpt attributes=0x8000000000000001",
 
-function Initialize-DiskLayout {
-    param([Parameter(Mandatory)] [int] $DiskNumber)
-
-    Write-Info "Laying out Windows 11 UEFI/GPT partition scheme on Disk $DiskNumber..."
-    Write-Info "  ESP     – 100 MB  FAT32"
-    Write-Info "  MSR     – 16 MB   (unformatted)"
-    Write-Info "  Windows – max     NTFS (mounted as W:, shrunk by 750 MB)"
-    Write-Info "  Recovery– 750 MB  NTFS"
-    Write-Host ""
-
-    Clear-AndInitializeDisk -DiskNumber $DiskNumber
-    New-EspPartition        -DiskNumber $DiskNumber | Out-Null
-    New-MsrPartition        -DiskNumber $DiskNumber
-    $winPart = New-WindowsPartition -DiskNumber $DiskNumber
-
-    $shrunk = Resize-WindowsForRecovery -DiskNumber $DiskNumber -PartitionNumber $winPart.PartitionNumber
-    if ($shrunk) {
-        New-RecoveryPartition -DiskNumber $DiskNumber
-    }
-
-    Write-Ok "Partition layout complete. W: is ready for the OS image."
-    return $winPart
-}
-
-function Get-OsCatalogFile {
-    param([Parameter(Mandatory)] [string] $CatalogUri)
-
-    Enable-Tls12
-    Write-Info "Downloading OS catalog from OSD project..."
-    $tmpPath = Join-Path ([IO.Path]::GetTempPath()) ("os-catalog_{0}.xml" -f [guid]::NewGuid())
-
-    try {
-        Invoke-WebRequest -Uri $CatalogUri -UseBasicParsing -OutFile $tmpPath -ErrorAction Stop
-        Write-Ok "Catalog downloaded."
-        return $tmpPath
-    } catch {
-        throw "Failed to download OS catalog from '$CatalogUri': $($_.Exception.Message)"
-    }
-}
-
-function ConvertFrom-CatalogFile {
-    param([Parameter(Mandatory)] [string] $FilePath)
-
-    try {
-        $entries = Import-Clixml -Path $FilePath -ErrorAction Stop
-        Write-Info "Parsed catalog as CLIXML – $(@($entries).Count) entries loaded."
-        return $entries
-    } catch {
-        Write-Warn "CLIXML parse failed – attempting raw XML fallback..."
-    }
-
-    try {
-        [xml]$xml    = Get-Content -LiteralPath $FilePath -Raw
-        $nodes       = $xml.SelectNodes('//Object')
-        $entries     = @()
-
-        if ($nodes -and $nodes.Count -gt 0) {
-            foreach ($node in $nodes) {
-                $props = @{}
-                foreach ($prop in $node.Property) { $props[$prop.Name] = $prop.InnerText }
-                $entries += New-Object psobject -Property $props
-            }
-            Write-Info "Parsed catalog as XML – $($entries.Count) entries loaded."
-            return $entries
-        }
-
-        throw "Unrecognised XML structure – no <Object> nodes found."
-    } catch {
-        throw "Unable to parse catalog as CLIXML or XML: $($_.Exception.Message)"
-    }
-}
-
-function Select-BestCatalogEntry {
-    param(
-        [Parameter(Mandatory)] [object[]] $Entries,
-        [Parameter(Mandatory)] [string]   $OperatingSystem,
-        [Parameter(Mandatory)] [string]   $ReleaseId,
-        [Parameter(Mandatory)] [string]   $Architecture,
-        [Parameter(Mandatory)] [string]   $LanguageCode,
-        [Parameter(Mandatory)] [string]   $License
+        "list volume",
+        "exit"
     )
 
-    Write-Info "Filtering catalog for: $OperatingSystem $ReleaseId $Architecture $LanguageCode $License"
+    if ($PSCmdlet.ShouldProcess("Disk $DiskNumber", "Apply UEFI/GPT partition layout")) {
+        $commands -join "`r`n" | diskpart
+    }
+}
 
-    $filtered = $Entries | Where-Object {
+# ---------------------------
+# OS Catalog handling (FIXED: correct variable usage + explicit catalog passing)
+# ---------------------------
+
+function Get-OSCatalog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $CatalogUrl
+    )
+
+    if (-not $script:TempRoot) { $script:TempRoot = Get-TempRoot }
+
+    # Get the URL "leaf" (last path segment) and use it as the local filename
+    try {
+        $uri  = [Uri]$CatalogUrl
+        $leaf = [IO.Path]::GetFileName($uri.AbsolutePath)
+    }
+    catch {
+        # If CatalogUrl isn't a valid URI, fall back to treating it as a path-like string
+        $leaf = Split-Path -Path $CatalogUrl -Leaf
+    }
+
+    # Fallback if leaf is empty (e.g., URL ends with /)
+    if ([string]::IsNullOrWhiteSpace($leaf)) {
+        $leaf = "catalog.clixml"
+    }
+
+    $localPath = Join-Path $script:TempRoot $leaf
+
+    Write-Info "Downloading OS catalog: $CatalogUrl"
+    Invoke-FileDownload -Url $CatalogUrl -DestPath $localPath -Retries 2 | Out-Null
+
+    Write-Info "Importing PowerShell CLIXML catalog: $localPath"
+    $catalog = Import-Clixml -Path $localPath
+    return $catalog
+}
+
+function Resolve-OsCatalogEntry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        $Catalog,
+
+        [Parameter(Mandatory)]
+        [string] $OperatingSystem,
+
+        [Parameter(Mandatory)]
+        [string] $ReleaseId,
+
+        [Parameter(Mandatory)]
+        [string] $Architecture,
+
+        [Parameter(Mandatory)]
+        [string] $LanguageCode,
+
+        [Parameter(Mandatory)]
+        [string] $License
+
+
+    )
+
+    $entries = $Catalog
+    if (-not $entries) {
+        throw "Catalog contains no OperatingSystem entries."
+    }
+
+    $filtered = $entries | Where-Object {
         $_.OperatingSystem -eq $OperatingSystem -and
         $_.ReleaseId       -eq $ReleaseId       -and
         $_.Architecture    -eq $Architecture    -and
@@ -516,250 +469,254 @@ function Select-BestCatalogEntry {
     }
 
     if (-not $filtered) {
+        throw "No matching OS entry found in catalog for: OS='$OperatingSystem' ReleaseId='$ReleaseId' Arch='$Architecture' Lang='$LanguageCode' License='$License'."
+    }
+
+    # If multiple match, pick newest build
+    $best = $filtered |
+        Sort-Object -Property Build -Descending |
+        Select-Object -First 1
+
+    return $best
+}
+
+function Get-HardwareIdentity {
+    [CmdletBinding()]
+    param()
+
+    $bb = Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction SilentlyContinue
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+
+    # Some environments spell these differently or leave them empty
+    $bbSku     = $bb.SKU
+    if ([string]::IsNullOrWhiteSpace($bbSku)) { $bbSku = $bb.SKUNumber }  # occasional variant
+
+    [pscustomobject]@{
+        CSManufacturer = $cs.Manufacturer
+        CSModel        = $cs.Model
+
+        BBManufacturer = $bb.Manufacturer
+        BBModel        = $bb.Model
+        BBSKU          = $bbSku
+        BBProduct      = $bb.Product
+    }
+}
+
+
+
+function Find-DriverPackMatch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object] $Hardware,
+
+        [Parameter(Mandatory)]
+        [object[]] $DriverCatalog,
+
+        # Optional: minimum score required to accept a match
+        [int] $MinScore = 6
+    )
+
+    function Normalize([string]$s) {
+        if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+        # collapse whitespace + uppercase
+        return (($s -replace '\s+', ' ').Trim()).ToUpperInvariant()
+    }
+
+    function Get-AnyPropValue {
+        param(
+            [Parameter(Mandatory)] $Obj,
+            [Parameter(Mandatory)] [string[]] $Names
+        )
+        foreach ($n in $Names) {
+            # support dynamic properties
+            $p = $Obj.PSObject.Properties[$n]
+            if ($p) {
+                $v = $p.Value
+                if (-not [string]::IsNullOrWhiteSpace([string]$v)) { return [string]$v }
+            }
+        }
         return $null
     }
 
-    Write-Info "$(@($filtered).Count) matching entry/entries found – selecting latest build..."
+    # In case your CLIXML property names drift over time, list aliases here.
+    $propMap = @{
+        CSManufacturer = @('CSManufacturer','ComputerSystemManufacturer','CSMfr','ManufacturerCS')
+        CSModel        = @('CSModel','ComputerSystemModel','CSProduct','ModelCS')
+        BBManufacturer = @('BBManufacturer','BaseBoardManufacturer','BBMfr','ManufacturerBB')
+        BBModel        = @('BBModel','BaseBoardModel','BBBoardModel','ModelBB')
+        BBSKU          = @('BBSKU','BB-SKU','BaseBoardSKU','SKUNumber','SKU')
+        BBProduct      = @('BBProduct','BaseBoardProduct','BBProd','Product')
+        URL            = @('URL','Uri','DownloadUrl','DriverUrl')
+        Sha1           = @('Sha1','SHA1','HashSha1','SHA-1')
+        Sha256         = @('Sha256','SHA256','HashSha256','SHA-256')
+    }
 
-    $latest = $filtered | Sort-Object -Descending -Property {
-        $v = [string]$_.Build
-        try { [version]$v } catch { [version]'0.0' }
-    } | Select-Object -First 1
+    # Normalize hardware fields once
+    $hw = [pscustomobject]@{
+        CSManufacturer = Normalize $Hardware.CSManufacturer
+        CSModel        = Normalize $Hardware.CSModel
+        BBManufacturer = Normalize $Hardware.BBManufacturer
+        BBModel        = Normalize $Hardware.BBModel
+        BBSKU          = Normalize $Hardware.BBSKU
+        BBProduct      = Normalize $Hardware.BBProduct
+    }
 
+    # Weighting: tune as you like
+    $weights = @{
+        BBProduct      = 6
+        BBSKU          = 6
+        CSModel        = 4
+        BBModel        = 3
+        CSManufacturer = 2
+        BBManufacturer = 2
+    }
+
+    $penalty = 2  # mismatch penalty when both sides have a value
+
+    $scored = foreach ($item in $DriverCatalog) {
+
+        $entry = [pscustomobject]@{
+            CSManufacturer = Normalize (Get-AnyPropValue $item $propMap.CSManufacturer)
+            CSModel        = Normalize (Get-AnyPropValue $item $propMap.CSModel)
+            BBManufacturer = Normalize (Get-AnyPropValue $item $propMap.BBManufacturer)
+            BBModel        = Normalize (Get-AnyPropValue $item $propMap.BBModel)
+            BBSKU          = Normalize (Get-AnyPropValue $item $propMap.BBSKU)
+            BBProduct      = Normalize (Get-AnyPropValue $item $propMap.BBProduct)
+
+            URL            = Get-AnyPropValue $item $propMap.URL
+            Sha1           = Get-AnyPropValue $item $propMap.Sha1
+            Sha256         = Get-AnyPropValue $item $propMap.Sha256
+        }
+
+        $score = 0
+        $matchedFields = New-Object System.Collections.Generic.List[string]
+
+        foreach ($k in $weights.Keys) {
+            $hv = $hw.$k
+            $ev = $entry.$k
+
+            if ($null -ne $hv -and $null -ne $ev) {
+                if ($hv -eq $ev) {
+                    $score += $weights[$k]
+                    $matchedFields.Add($k)
+                }
+                else {
+                    $score -= $penalty
+                }
+            }
+        }
+
+        [pscustomobject]@{
+            Score         = $score
+            MatchedFields = $matchedFields -join ','
+            Entry         = $item
+            EntryView     = $entry
+        }
+    }
+
+    $bestScore = ($scored | Measure-Object -Property Score -Maximum).Maximum
+    $best      = $scored | Where-Object Score -eq $bestScore
+
+    # Reject weak matches
+    if ($null -eq $bestScore -or $bestScore -lt $MinScore -or $best.Count -eq 0) {
+        return [pscustomobject]@{
+            Matched      = $false
+            Reason       = "No match met minimum score ($MinScore). BestScore=$bestScore"
+            Hardware     = $Hardware
+            Candidates   = @()
+        }
+    }
+
+    # If tie, return candidates (so you can log/inspect)
+    if ($best.Count -ne 1) {
+        return [pscustomobject]@{
+            Matched    = $false
+            Reason     = "Multiple best matches (tie) at score $bestScore"
+            Hardware   = $Hardware
+            Candidates = $best | Select-Object Score, MatchedFields, @{n='URL';e={$_.EntryView.URL}}, @{n='Sha1';e={$_.EntryView.Sha1}}, @{n='Sha256';e={$_.EntryView.Sha256}}
+        }
+    }
+
+    # Exactly one best match: return URL + hashes if present
+    $one = $best[0].EntryView
     return [pscustomobject]@{
-        ESDUrl = $latest.Url
-        Sha1   = if ([string]::IsNullOrWhiteSpace([string]$latest.Sha1))   { '' } else { [string]$latest.Sha1 }
-        Sha256 = if ([string]::IsNullOrWhiteSpace([string]$latest.Sha256)) { '' } else { [string]$latest.Sha256 }
-    }
-}
-
-function Resolve-OsCatalogEntry {
-    param(
-        [string] $CatalogUri,
-        [string] $OperatingSystem,
-        [string] $ReleaseId,
-        [string] $Architecture,
-        [string] $LanguageCode,
-        [string] $License
-    )
-
-    $tmpFile = $null
-    try {
-        $tmpFile = Get-OsCatalogFile       -CatalogUri $CatalogUri
-        $entries = ConvertFrom-CatalogFile -FilePath $tmpFile
-        $entry   = Select-BestCatalogEntry -Entries $entries `
-                        -OperatingSystem $OperatingSystem -ReleaseId $ReleaseId `
-                        -Architecture $Architecture -LanguageCode $LanguageCode `
-                        -License $License
-
-        if (-not $entry) {
-            throw "No matching OS entry found in catalog."
-        }
-
-        Write-Ok "Resolved OS entry from catalog."
-        return $entry
-    } finally {
-        if ($tmpFile -and (Test-Path -LiteralPath $tmpFile)) {
-            Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
+        Matched   = $true
+        Score     = $bestScore
+        Hardware  = $Hardware
+        URL       = $one.URL
+        Sha1      = $one.Sha1
+        Sha256    = $one.Sha256
+        # Optional: include what matched for traceability
+        MatchInfo = [pscustomobject]@{
+            MatchedFields = $best[0].MatchedFields
+            CSManufacturer = $one.CSManufacturer
+            CSModel        = $one.CSModel
+            BBManufacturer = $one.BBManufacturer
+            BBModel        = $one.BBModel
+            BBSKU          = $one.BBSKU
+            BBProduct      = $one.BBProduct
         }
     }
 }
 
-function Save-OsImage {
-    param(
-        [Parameter(Mandatory)] [string] $Url,
-        [string] $Sha1Hash,
-        [string] $Sha256Hash,
-        [Parameter(Mandatory)] [string] $DestinationDir
-    )
 
-    if (-not (Test-Path -LiteralPath $DestinationDir)) {
-        New-Item -ItemType Directory -Path $DestinationDir -Force | Out-Null
-    }
 
-    $fileName = Split-Path -Path $Url -Leaf
-    $destPath = Join-Path $DestinationDir $fileName
+# ---------------------------
+# MAIN (minimal example wiring so returns are actually consumed correctly)
+# ---------------------------
 
-    Invoke-FileDownload -Url $Url -DestPath $destPath
+try {
+    $script:TempRoot = Get-TempRoot
 
-    if ($Sha1Hash -or $Sha256Hash) {
-        Confirm-FileHash -FilePath $destPath -ExpectedSha1 $Sha1Hash -ExpectedSha256 $Sha256Hash
-    }
+    Show-Banner
+    $sys = Get-SystemInfo
+    Write-Info "PowerShell: $($sys.PSVersion)"
+    Write-Info "OS: $($sys.OSCaption)"
+    Write-Info "TempRoot: $script:TempRoot"
 
-    $bytes = (Get-Item -LiteralPath $destPath).Length
+    Start-Step "Download and resolve OS catalog entry"
+    $catalog = Get-OSDCatalog -CatalogUrl $OSCatalogUrl
 
-    [pscustomobject]@{
-        Path  = $destPath
-        Bytes = $bytes
-    }
+    $osEntry = Resolve-OsCatalogEntry -Catalog $catalog `
+        -OperatingSystem $OperatingSystem `
+        -ReleaseId $ReleaseId `
+        -Architecture $Architecture `
+        -LanguageCode $LanguageCode `
+        -License $License
+
+    # Show selection (properties depend on catalog schema)
+    Write-Ok "Selected OS entry:"
+    $osEntry | Format-List * | Out-String | ForEach-Object { Write-Info $_.TrimEnd() }
+
+
+    # From here, you would typically:
+    # - Download the ISO/WIM/ESD referenced by $osEntry
+    # - Select a target disk via Get-TargetDisk
+    # - Apply New-UEFIPartitionLayout -DiskNumber $disk.Number
+    # - Apply image, inject drivers, configure BCD, etc.
+
+    Write-Ok "Script baseline checks complete."
+
+} catch {
+    Write-Fail $_.Exception.Message
+    throw
 }
+$driverCatalog = Get-OSCatalog -CatalogUrl $DriverCatalogUrl   # your existing downloader/importer
+$hw = Get-HardwareIdentity
 
-function Expand-OsImage {
-    param(
-        [Parameter(Mandatory)] [string] $ImagePath,
-        [Parameter(Mandatory)] [int]    $Index,
-        [Parameter(Mandatory)] [string] $Destination
-    )
+$result = Find-DriverPackMatch -Hardware $hw -DriverCatalog $driverCatalog
 
-    Write-Info "Applying image index $Index from '$ImagePath' to '$Destination'..."
+if ($result.Matched) {
+    Write-Output ("URL:    {0}" -f $result.URL)
 
-    $args = @(
-        "/Apply-Image",
-        "/ImageFile:`"$ImagePath`"",
-        "/Index:$Index",
-        "/ApplyDir:$Destination"
-    )
+    $sha1 = if (-not [string]::IsNullOrWhiteSpace([string]$result.Sha1)) { $result.Sha1 } else { '<none>' }
+    $sha256 = if (-not [string]::IsNullOrWhiteSpace([string]$result.Sha256)) { $result.Sha256 } else { '<none>' }
 
-    $proc = Start-Process -FilePath dism.exe -ArgumentList $args -Wait -PassThru -NoNewWindow
-    if ($proc.ExitCode -ne 0) {
-        throw "DISM apply failed with exit code $($proc.ExitCode)."
-    }
-
-    Write-Ok "Image applied successfully."
-
-    [pscustomobject]@{
-        ImagePath  = $ImagePath
-        ImageIndex = $Index
-        ImageName  = "Index $Index"
-    }
+    Write-Output ("Sha1:   {0}" -f $sha1)
+    Write-Output ("Sha256: {0}" -f $sha256)
 }
-
-function Install-DriversOffline {
-    param(
-        [Parameter(Mandatory)] [string] $SoftPaqUrl,
-        [Parameter(Mandatory)] [string] $WindowsPath
-    )
-
-    Write-Info "Preparing offline driver installation into $WindowsPath..."
-
-    # Normalize Windows path
-    $WindowsPath = (Resolve-Path $WindowsPath).ProviderPath
-    Write-Info "Resolved Windows path: $WindowsPath"
-
-    # Use OS volume for extraction
-    $osVolume = Split-Path $WindowsPath -Qualifier
-    $driverDir  = Join-Path $osVolume "BuildOSD\Drivers"
-    $softPaqExe = Join-Path $driverDir "SoftPaq.exe"
-    $extractDir = Join-Path $driverDir "Extracted"
-
-    New-Item -ItemType Directory -Path $driverDir  -Force | Out-Null
-    New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
-
-    Invoke-FileDownload -Url $SoftPaqUrl -DestPath $softPaqExe
-
-    Write-Info "Extracting SoftPaq to $extractDir..."
-    & $softPaqExe "/s" "/e" "/f`"$extractDir`""
-    if ($LASTEXITCODE -ne 0) {
-        throw "SoftPaq extraction failed with exit code $LASTEXITCODE."
-    }
-
-    Write-Info "Injecting drivers using Add-WindowsDriver..."
-    Add-WindowsDriver -Path $WindowsPath -Driver $extractDir -Recurse -ErrorAction Stop
-
-    Write-Ok "Drivers injected successfully."
-    return "Drivers injected from SoftPaq."
+else {
+    Write-Output $result.Reason
+    $result.Candidates | Format-Table -AutoSize
 }
-
-
-
-Show-Banner
-
-$buildResults = @{}
-
-Start-Step "System Information"
-$sys = Get-SystemInfo
-Write-Info "PowerShell Version : $($sys.PSVersion)"
-Write-Info "Host OS            : $($sys.OSCaption)"
-Write-Ok   "System info collected."
-$buildResults['System'] = "$($sys.OSCaption) / PS $($sys.PSVersion)"
-
-Start-Step "OS Catalog Resolution"
-$entry = Resolve-OsCatalogEntry `
-            -CatalogUri      $CatalogUri `
-            -OperatingSystem $OperatingSystem `
-            -ReleaseId       $ReleaseId `
-            -Architecture    $Architecture `
-            -LanguageCode    $LanguageCode `
-            -License         $License
-
-Write-Info "Selected ESD URL: $($entry.ESDUrl)"
-$buildResults['Catalog'] = "$OperatingSystem $ReleaseId $Architecture $LanguageCode $License"
-
-Start-Step "Disk Selection & Partitioning"
-$disk = Get-TargetDisk -PreferredNumber $TargetDiskNumber
-Write-Info "Selected Disk $($disk.Number)"
-
-if ($SkipPartitioning) {
-    Write-Warn "Skipping disk partitioning (SkipPartitioning flag set)."
-    $winPart = Get-Partition -DiskNumber $disk.Number |
-               Where-Object { $_.GptType -eq '{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}' }
-} else {
-    $winPart = Initialize-DiskLayout -DiskNumber $disk.Number
-}
-
-$WindowsDriveLetter = ($winPart | Get-Volume).DriveLetter + ':'
-Write-Ok "Windows partition mounted as $WindowsDriveLetter"
-$buildResults['Windows Volume'] = $WindowsDriveLetter
-
-Start-Step "OS Image Download & Verification"
-
-if (-not $OsDownloadDir) {
-    $OsDownloadDir = Join-Path $WindowsDriveLetter 'BuildOSD'
-}
-
-Write-Info "Using OS download directory: $OsDownloadDir"
-New-Item -ItemType Directory -Path $OsDownloadDir -Force | Out-Null
-
-$os = Save-OsImage `
-        -Url             $entry.ESDUrl  `
-        -Sha1Hash        $entry.Sha1    `
-        -Sha256Hash      $entry.Sha256  `
-        -DestinationDir  $OsDownloadDir
-
-$buildResults['OS Image'] = "$($os.Path) ($([math]::Round($os.Bytes/1GB,2)) GB)"
-
-Start-Step "Apply OS Image to $WindowsDriveLetter\"
-
-if ($SkipApplyImage) {
-    Write-Warn "Skipping image apply (SkipApplyImage flag set)."
-} else {
-    $apply = Expand-OsImage `
-                -ImagePath   $os.Path `
-                -Index       $ImageIndex `
-                -Destination "$WindowsDriveLetter\"
-
-    $buildResults['Applied Image'] = "$($apply.ImageName) (Index $($apply.ImageIndex))"
-}
-
-Start-Step "Driver Injection"
-
-if ($SkipDrivers -or -not $DriverSoftPaqUrl) {
-    Write-Warn "Skipping driver injection."
-} else {
-    $driverResult = Install-DriversOffline `
-                        -SoftPaqUrl $DriverSoftPaqUrl `
-                        -WindowsPath (Join-Path $WindowsDriveLetter 'Windows')
-
-
-    $buildResults['Drivers'] = $driverResult
-}
-
-Start-Step "UEFI Boot Initialization"
-
-if ($SkipBootInit) {
-    Write-Warn "Skipping boot initialization."
-} else {
-    $esp = Get-Partition -DiskNumber $disk.Number |
-           Where-Object { $_.GptType -eq '{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}' }
-
-    $EspDriveLetter = ($esp | Get-Volume).DriveLetter + ':'
-
-    Write-Info "Using ESP at $EspDriveLetter"
-
-    bcdboot "$WindowsDriveLetter\Windows" /s $EspDriveLetter /f UEFI $BcdBootExtraArgs
-
-    Write-Ok "Boot files initialized."
-    $buildResults['Boot Init'] = "UEFI boot configured"
-}
-
-Show-CompletionSummary -Results $buildResults
