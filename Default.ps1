@@ -728,37 +728,37 @@ function Expand-HPSoftPaq {
 # ---------------------------
 # MAIN
 # ---------------------------
-Invoke-Step "1) Setup BuildForge root + fixed logging" {
+Invoke-Step "  1) Setup BuildForge root + fixed logging" {
     Initialize-Logging
     Update-BuildForgeRoot
     Write-Log "Fixed Log:  $script:LogFile" 'INFO'
     Write-Log "Root Dir:   $script:BuildForgeRoot" 'INFO'
 }
 
-Invoke-Step "2) List PowerShell + environment info" {
+Invoke-Step "  2) List PowerShell + environment info" {
     $osCap = 'Unknown / WinRE'
     try { $osCap = (Get-CimInstance Win32_OperatingSystem).Caption } catch {}
     Write-Log "PowerShell: $($PSVersionTable.PSVersion)" 'INFO'
     Write-Log "OS:         $osCap" 'INFO'
 }
 
-Invoke-Step "3) List hardware identity" {
+Invoke-Step "  3) List hardware identity" {
     $hw = Get-HardwareIdentity
     $script:Hardware = $hw
     Write-Log ("CS: {0} {1}" -f $hw.CSManufacturer, $hw.CSModel) 'INFO'
     Write-Log ("BB: {0} {1} SKU={2} Prod={3}" -f $hw.BBManufacturer, $hw.BBModel, $hw.BBSKU, $hw.BBProduct) 'INFO'
 }
 
-Invoke-Step "4) List target OS parameters" {
+Invoke-Step "  4) List target OS parameters" {
     Write-Log "OS=$OperatingSystem ReleaseId=$ReleaseId Arch=$Architecture Lang=$LanguageCode License=$License SKU=$SKU" 'INFO'
 }
 
-Invoke-Step "5) Download catalogs" {
+Invoke-Step "  5) Download catalogs" {
     $script:OSCatalog     = Get-Catalog -CatalogUrl $OSCatalogUrl
     $script:DriverCatalog = Get-Catalog -CatalogUrl $DriverCatalogUrl
 }
 
-Invoke-Step "6) Match OS entry from catalog" {
+Invoke-Step "  6) Match OS entry from catalog" {
     $osEntry = Resolve-OsCatalogEntry -Catalog $script:OSCatalog
     $script:OsEntry = $osEntry
 
@@ -775,7 +775,7 @@ Invoke-Step "6) Match OS entry from catalog" {
     Write-Log "Selected OS URL: $osUrl" 'OK'
 }
 
-Invoke-Step "7) Match driver pack from hardware + catalog" {
+Invoke-Step "  7) Match driver pack from hardware + catalog" {
     $res = Find-DriverPackMatch -Hardware $script:Hardware -DriverCatalog $script:DriverCatalog
     $script:DriverMatch = $res
 
@@ -787,13 +787,13 @@ Invoke-Step "7) Match driver pack from hardware + catalog" {
     }
 }
 
-Invoke-Step "8) Select best local disk for OS" {
+Invoke-Step "  8) Select best local disk for OS" {
     $disk = Get-TargetDisk
     $script:TargetDisk = $disk
     Write-Log ("Disk #{0} BusType={1} Size={2:N2}GB Boot={3} System={4}" -f $disk.Number, $disk.BusType, ($disk.Size/1GB), $disk.IsBoot, $disk.IsSystem) 'OK'
 }
 
-Invoke-Step "9) Partition disk (UEFI/GPT) if needed" {
+Invoke-Step "  9) Partition disk (UEFI/GPT) if needed" {
     $haveW = Test-Path -LiteralPath 'W:\'
     $haveS = Test-Path -LiteralPath 'S:\'
     $haveR = Test-Path -LiteralPath 'R:\'
@@ -807,12 +807,12 @@ Invoke-Step "9) Partition disk (UEFI/GPT) if needed" {
     }
 }
 
-Invoke-Step "10) Move BuildForge root to W: (when W: exists)" {
+Invoke-Step " 10) Move BuildForge root to W: (when W: exists)" {
     Update-BuildForgeRoot
     Write-Log "Current Root Dir: $script:BuildForgeRoot" 'INFO'
 }
 
-Invoke-Step "11) Download correct OS ESD/WIM (best match)" {
+Invoke-Step " 11) Download correct OS ESD/WIM (best match)" {
     Update-BuildForgeRoot
     $osDir = Join-Path $script:BuildForgeRoot 'OS'
     Ensure-Dir $osDir
@@ -830,7 +830,7 @@ Invoke-Step "11) Download correct OS ESD/WIM (best match)" {
     $script:OsPath = $osPath
 }
 
-Invoke-Step "12) Download best-match driver pack (if match) (no extract yet)" {
+Invoke-Step " 12) Download best-match driver pack (if match) (no extract yet)" {
     Update-BuildForgeRoot
     if (-not ($script:DriverMatch.Matched -and $script:DriverMatch.URL)) {
         Write-Log "No driver URL matched; skipping download." 'WARN'
@@ -848,7 +848,7 @@ Invoke-Step "12) Download best-match driver pack (if match) (no extract yet)" {
     $script:DriverPackPath = $drvPath
 }
 
-Invoke-Step "13) List ESD/WIM indexes (DISM)" {
+Invoke-Step " 13) List ESD/WIM indexes (DISM)" {
     # DISM /Get-ImageInfo lists images in WIM/ESD [1](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/take-inventory-of-an-image-or-component-using-dism?view=windows-11)
     $idx = Get-ImageIndexesFromEsd -ImageFile $script:OsPath
     $script:ImageIndexes = $idx
@@ -859,13 +859,13 @@ Invoke-Step "13) List ESD/WIM indexes (DISM)" {
     if (-not $idx -or $idx.Count -eq 0) { throw "No indexes parsed from DISM output." }
 }
 
-Invoke-Step "14) Select desired index (Windows 11 $SKU)" {
+Invoke-Step " 14) Select desired index (Windows 11 $SKU)" {
     $index = Select-DesiredIndex -Indexes $script:ImageIndexes
     $script:SelectedIndex = $index
     Write-Log "Selected index: $index (SKU=$SKU)" 'OK'
 }
 
-Invoke-Step "15) Expand selected index to W:\" {
+Invoke-Step " 15) Expand selected index to W:\" {
 
     $already = Test-Path -LiteralPath 'W:\Windows\System32'
     if ($already -and -not $ForceApplyImage) {
@@ -894,7 +894,7 @@ Invoke-Step "15) Expand selected index to W:\" {
     }
 }
 
-Invoke-Step "16) Configure boot (BCDBoot UEFI)" {
+Invoke-Step " 16) Configure boot (BCDBoot UEFI)" {
     # BCDBoot sets up boot files for an applied image
     if ($PSCmdlet.ShouldProcess("S:\", "BCDBoot UEFI from W:\Windows")) {
 
@@ -912,7 +912,7 @@ Invoke-Step "16) Configure boot (BCDBoot UEFI)" {
     }
 }
 
-Invoke-Step "17) Setup WinRE WIM on recovery partition + register offline" {
+Invoke-Step " 17) Setup WinRE WIM on recovery partition + register offline" {
 
     $reDir = 'R:\Recovery\WindowsRE'
     Ensure-Dir $reDir
@@ -956,7 +956,7 @@ Invoke-Step "17) Setup WinRE WIM on recovery partition + register offline" {
     }
 }
 
-Invoke-Step "18) Extract HP driver pack silently (wait for full process tree)" {
+Invoke-Step " 18) Extract HP driver pack silently (wait for full process tree)" {
     if (-not $script:DriverPackPath) {
         Write-Log "No driver pack downloaded; skipping extraction." 'WARN'
         return
@@ -984,7 +984,7 @@ Invoke-Step "18) Extract HP driver pack silently (wait for full process tree)" {
     $script:DriverExtractDir = $extractDir
 }
 
-Invoke-Step "19) Inject drivers into offline image (DISM /Add-Driver /Recurse)" {
+Invoke-Step " 19) Inject drivers into offline image (DISM /Add-Driver /Recurse)" {
     if (-not $script:DriverExtractDir) {
         Write-Log "No extracted drivers directory; skipping injection." 'WARN'
         return
