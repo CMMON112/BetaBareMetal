@@ -36,33 +36,71 @@ $script:TotalSteps  = 6
 # ---------------------------
 
 function Get-TempRoot {
-    $cTemp = 'C:\Windows\Temp\BuildForge'
-    $xTemp = 'X:\Windows\Temp\BuildForge'
+    # Candidate locations
+    $xRoot         = 'X:\Windows\Temp\BuildForge'
+    $wRootNoWin    = 'W:\BuildForge'
+    $wRootWinTemp  = 'W:\Windows\Temp\BuildForge'
 
-    # If C:\Windows exists, prefer C:\Windows\Temp\BuildForge
-    if (Test-Path -LiteralPath 'C:\Windows') {
-
-        # If X exists and C doesn't, migrate X -> C first (previously unreachable)
-        if ((Test-Path -LiteralPath $xTemp) -and -not (Test-Path -LiteralPath $cTemp)) {
-            New-Item -ItemType Directory -Path (Split-Path -Parent $cTemp) -Force | Out-Null
-            Move-Item -LiteralPath $xTemp -Destination $cTemp -Force
+    function Ensure-Dir([string]$Path) {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            New-Item -ItemType Directory -Path $Path -Force | Out-Null
         }
-
-        # Ensure the C:\Windows\Temp\BuildForge directory exists
-        if (-not (Test-Path -LiteralPath $cTemp)) {
-            New-Item -ItemType Directory -Path $cTemp -Force | Out-Null
-        }
-
-        return $cTemp
     }
 
-    # If C:\Windows does NOT exist, ensure X:\Windows\Temp\BuildForge exists
-    if (-not (Test-Path -LiteralPath $xTemp)) {
-        New-Item -ItemType Directory -Path $xTemp -Force | Out-Null
+    function Move-BuildForgeContents([string]$Source, [string]$Destination) {
+        if (-not (Test-Path -LiteralPath $Source)) { return }
+
+        Ensure-Dir $Destination
+
+        # Merge contents from Source into Destination safely (works even if Destination exists)
+        $items = Get-ChildItem -LiteralPath $Source -Force -ErrorAction SilentlyContinue
+        foreach ($i in $items) {
+            $destPath = Join-Path $Destination $i.Name
+            try {
+                Move-Item -LiteralPath $i.FullName -Destination $destPath -Force -ErrorAction Stop
+            } catch {
+                # If something is locked or collides, try moving into the destination root.
+                Move-Item -LiteralPath $i.FullName -Destination $Destination -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        # Remove the (now empty) source folder if possible
+        Remove-Item -LiteralPath $Source -Force -Recurse -ErrorAction SilentlyContinue
     }
 
-    return $xTemp
+    $hasX       = Test-Path -LiteralPath 'X:\'
+    $hasW       = Test-Path -LiteralPath 'W:\'
+    $hasWWin    = Test-Path -LiteralPath 'W:\Windows'
+
+    # 3) If W:\Windows exists, move BuildForge to W:\Windows\Temp\BuildForge
+    if ($hasWWin) {
+        Ensure-Dir $wRootWinTemp
+
+        # Promote anything previously written elsewhere into the best location
+        Move-BuildForgeContents -Source $xRoot      -Destination $wRootWinTemp
+        Move-BuildForgeContents -Source $wRootNoWin -Destination $wRootWinTemp
+
+        return $wRootWinTemp
+    }
+
+    # 2) If W:\ and X:\ exist but W:\Windows does not,
+    #    create and move the contents of X:\Windows\Temp\BuildForge -> W:\BuildForge
+    if ($hasW -and $hasX -and -not $hasWWin) {
+        Ensure-Dir $wRootNoWin
+        Move-BuildForgeContents -Source $xRoot -Destination $wRootNoWin
+        return $wRootNoWin
+    }
+
+    # 1) If X:\ is available create the BuildForge folder in X:\Windows\Temp
+    if ($hasX) {
+        Ensure-Dir $xRoot
+        return $xRoot
+    }
+
+    # No valid temp drive available
+    throw "Get-TempRoot: Neither X:\ nor W:\ is available to host BuildForge temp logs."
 }
+
 
 # Core unified output + logging function
 function Write-Status {
@@ -684,21 +722,94 @@ function Find-DriverPackMatch {
 
 
 # ---------------------------
-# MAIN (minimal example wiring so returns are actually consumed correctly)
+# MAIN (fleshed out)
 # ---------------------------
 
-try {
-    $script:TempRoot = Get-TempRoot
+# Optional: allow targeting a specific disk
+# Add this param up top if you want it configurable:
+# [int] $TargetDiskNumber = -1
 
+# Make step count match reality
+$script:CurrentStep = 0
+$script:TotalSteps  = 14
+
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory)] [string] $FilePath,
+        [string[]] $Arguments = @(),
+        [switch] $IgnoreExitCode
+    )
+
+    Write-Info "Running: $FilePath $($Arguments -join ' ')"
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName               = $FilePath
+    $psi.Arguments              = ($Arguments -join ' ')
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute        = $false
+    $psi.CreateNoWindow         = $true
+
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+    [void]$p.Start()
+
+    $stdout = $p.StandardOutput.ReadToEnd()
+    $stderr = $p.StandardError.ReadToEnd()
+    $p.WaitForExit()
+
+    if ($stdout) { $stdout.TrimEnd() -split "`r?`n" | ForEach-Object { Write-Info $_ } }
+    if ($stderr) { $stderr.TrimEnd() -split "`r?`n" | ForEach-Object { Write-Warn $_ } }
+
+    if (-not $IgnoreExitCode -and $p.ExitCode -ne 0) {
+        throw "Command failed (exit $($p.ExitCode)): $FilePath $($Arguments -join ' ')"
+    }
+
+    return [pscustomobject]@{ ExitCode = $p.ExitCode; StdOut = $stdout; StdErr = $stderr }
+}
+
+function Get-EntryValue {
+    param(
+        [Parameter(Mandatory)] $Obj,
+        [Parameter(Mandatory)] [string[]] $Names
+    )
+    foreach ($n in $Names) {
+        $p = $Obj.PSObject.Properties[$n]
+        if ($p -and -not [string]::IsNullOrWhiteSpace([string]$p.Value)) {
+            return [string]$p.Value
+        }
+    }
+    return $null
+}
+
+function Get-LeafNameFromUrl([string]$Url, [string]$FallbackName) {
+    try {
+        $u = [Uri]$Url
+        $leaf = [IO.Path]::GetFileName($u.AbsolutePath)
+        if ([string]::IsNullOrWhiteSpace($leaf)) { return $FallbackName }
+        return $leaf
+    } catch {
+        return $FallbackName
+    }
+}
+
+try {
+    Start-Step "Creating WinRE Temporary Directory"
+    $script:TempRoot = Get-TempRoot
+    Write-Info "TempRoot: $script:TempRoot"
+
+    Start-Step "Displaying Banner"
     Show-Banner
+
+    Start-Step "Gathering Operating System and PowerShell Environment Information"
     $sys = Get-SystemInfo
     Write-Info "PowerShell: $($sys.PSVersion)"
     Write-Info "OS: $($sys.OSCaption)"
-    Write-Info "TempRoot: $script:TempRoot"
 
-    Start-Step "Download and resolve OS catalog entry"
+    Start-Step "Download Operating System Catalog"
     $catalog = Get-Catalog -CatalogUrl $OSCatalogUrl
 
+    Start-Step "Selecting Operating System object"
     $osEntry = Resolve-OsCatalogEntry -Catalog $catalog `
         -OperatingSystem $OperatingSystem `
         -ReleaseId $ReleaseId `
@@ -706,29 +817,198 @@ try {
         -LanguageCode $LanguageCode `
         -License $License
 
-    # Show selection (properties depend on catalog schema)
     Write-Ok "Selected OS entry:"
     $osEntry | Format-List * | Out-String | ForEach-Object { Write-Info $_.TrimEnd() }
 
-    Write-Ok "Script baseline checks complete."
+    # Resolve OS download fields (catalog schema tolerant)
+    $osUrl     = Get-EntryValue $osEntry @('URL','Url','Uri','DownloadUrl','ESDUrl','WimUrl')
+    $osSha1    = Get-EntryValue $osEntry @('Sha1','SHA1','HashSha1','SHA-1')
+    $osSha256  = Get-EntryValue $osEntry @('Sha256','SHA256','HashSha256','SHA-256')
+    $osIndex   = Get-EntryValue $osEntry @('Index','ImageIndex','WimIndex')
+    if (-not $osIndex) { $osIndex = 1 }
+
+    if (-not $osUrl) {
+        throw "OS catalog entry did not contain a usable URL field (URL/DownloadUrl/ESDUrl/WimUrl)."
+    }
+
+    Start-Step "Download Driver Catalog"
+    $driverCatalog = Get-Catalog -CatalogUrl $DriverCatalogUrl
+
+    Start-Step "Gathering Hardware Identity"
+    $hw = Get-HardwareIdentity
+    Write-Info ("Hardware: CS={0} {1} | BB={2} {3} SKU={4} Prod={5}" -f `
+        $hw.CSManufacturer, $hw.CSModel, $hw.BBManufacturer, $hw.BBModel, $hw.BBSKU, $hw.BBProduct)
+
+    Start-Step "Searching for Best Match Driver Package"
+    $result = Find-DriverPackMatch -Hardware $hw -DriverCatalog $driverCatalog
+
+    if ($result.Matched) {
+        Write-Ok ("Driver match found. Score={0} Exact={1} Compared={2} Fields={3}" -f `
+            $result.Score, $result.Exact, $result.Compared, $result.MatchInfo)
+        Write-Info "Driver URL: $($result.URL)"
+    } else {
+        Write-Warn "No single driver match selected: $($result.Reason)"
+        if ($result.Candidates) {
+            Write-Info "Top candidates (for troubleshooting):"
+            $result.Candidates | Format-Table -AutoSize | Out-String | ForEach-Object { Write-Info $_.TrimEnd() }
+        }
+    }
+
+    Start-Step "Selecting Suitable Local Disk"
+    # If you added $TargetDiskNumber param, pass it here:
+    # $disk = Get-TargetDisk -PreferredNumber $TargetDiskNumber
+    $disk = Get-TargetDisk
+    Write-Ok ("Selected disk: #{0} BusType={1} Size={2:N2} GB Boot={3} System={4}" -f `
+        $disk.Number, $disk.BusType, ($disk.Size/1GB), $disk.IsBoot, $disk.IsSystem)
+
+    Start-Step "Clearing Disk and Creating Partitions (UEFI/GPT)"
+    if ($PSCmdlet.ShouldProcess("Disk $($disk.Number)", "Clean + Apply UEFI partition layout")) {
+        New-UEFIPartitionLayout -DiskNumber $disk.Number
+        Write-Ok "Partition layout applied. Expect: S: EFI, W: Windows, R: Recovery"
+    } else {
+        Write-Warn "Skipped disk partitioning due to ShouldProcess (-WhatIf / -Confirm)."
+    }
+
+    Start-Step "Downloading Operating System Image (ESD/WIM)"
+    $osFileName = Get-LeafNameFromUrl -Url $osUrl -FallbackName "install.esd"
+    $osPath     = Join-Path $script:TempRoot $osFileName
+    Invoke-FileDownload -Url $osUrl -DestPath $osPath -Retries 2 | Out-Null
+
+    Start-Step "Performing File Hash Check (if catalog provides hashes)"
+    Confirm-FileHash -FilePath $osPath -ExpectedSha1 $osSha1 -ExpectedSha256 $osSha256
+    Write-Ok "OS image verified (or no hashes provided)."
+
+    Start-Step "Applying Operating System Image to W:\\"
+    if ($PSCmdlet.ShouldProcess("W:\\", "Apply Windows image from $osFileName (Index $osIndex)")) {
+        # DISM apply-image works for WIM/ESD
+        Invoke-Native -FilePath "dism.exe" -Arguments @(
+            "/Apply-Image",
+            "/ImageFile:$osPath",
+            "/Index:$osIndex",
+            "/ApplyDir:W:\"
+        ) | Out-Null
+
+        Write-Ok "Windows image applied to W:\"
+    } else {
+        Write-Warn "Skipped apply-image due to ShouldProcess."
+    }
+
+    Start-Step "Creating Boot Files (BCDBoot)"
+    if ($PSCmdlet.ShouldProcess("S:\\", "Create UEFI boot files from W:\\Windows")) {
+        Invoke-Native -FilePath "bcdboot.exe" -Arguments @(
+            "W:\Windows",
+            "/s", "S:",
+            "/f", "UEFI"
+        ) | Out-Null
+        Write-Ok "Boot files created."
+    } else {
+        Write-Warn "Skipped BCDBoot due to ShouldProcess."
+    }
+
+    Start-Step "Configuring WinRE on Recovery Partition (Offline)"
+    if ($PSCmdlet.ShouldProcess("R:\\", "Copy WinRE + register offline with ReAgentC")) {
+
+        # Create WinRE folder structure
+        $rePath = "R:\Recovery\WindowsRE"
+        if (-not (Test-Path -LiteralPath $rePath)) {
+            New-Item -ItemType Directory -Path $rePath -Force | Out-Null
+        }
+
+        # Copy Winre.wim from applied image
+        $srcWinre = "W:\Windows\System32\Recovery\Winre.wim"
+        if (Test-Path -LiteralPath $srcWinre) {
+            Copy-Item -LiteralPath $srcWinre -Destination (Join-Path $rePath "Winre.wim") -Force
+            Write-Ok "Copied Winre.wim to $rePath"
+        } else {
+            Write-Warn "Winre.wim not found at $srcWinre (image may not include it at that path)."
+        }
+
+        # Register WinRE offline:
+        # reagentc /setreimage /path R:\Recovery\WindowsRE /target W:\Windows
+        # reagentc /enable /target W:\Windows
+        Invoke-Native -FilePath "reagentc.exe" -Arguments @(
+            "/setreimage",
+            "/path", $rePath,
+            "/target", "W:\Windows"
+        ) | Out-Null
+
+        Invoke-Native -FilePath "reagentc.exe" -Arguments @(
+            "/enable",
+            "/target", "W:\Windows"
+        ) | Out-Null
+
+        Write-Ok "WinRE configured for offline Windows."
+        # ReAgentC offline syntax is documented by Microsoft. microsoft.com/en-us/windows-hardware/manufacture/desktop/reagentc-command-line-options?view=windows-11)
+    } else {
+        Write-Warn "Skipped WinRE configuration due to ShouldProcess."
+    }
+
+    Start-Step "Downloading Best-Matched Driver Package and Injecting Drivers (Offline)"
+    if ($result.Matched -and $result.URL) {
+
+        $drvFileName = Get-LeafNameFromUrl -Url $result.URL -FallbackName "driverpack.bin"
+        $drvPath     = Join-Path $script:TempRoot $drvFileName
+
+        if ($PSCmdlet.ShouldProcess($drvPath, "Download driver pack")) {
+            Invoke-FileDownload -Url $result.URL -DestPath $drvPath -Retries 2 | Out-Null
+            Confirm-FileHash -FilePath $drvPath -ExpectedSha1 $result.Sha1 -ExpectedSha256 $result.Sha256
+        } else {
+            Write-Warn "Skipped driver pack download due to ShouldProcess."
+        }
+
+        # Extract to folder (ZIP/CAB supported)
+        $extractRoot = Join-Path $script:TempRoot ("Drivers_{0}" -f ($hw.CSModel -replace '[^\w\-]+','_'))
+        if (-not (Test-Path -LiteralPath $extractRoot)) {
+            New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+        }
+
+        $ext = [IO.Path]::GetExtension($drvPath).ToLowerInvariant()
+
+        if ($PSCmdlet.ShouldProcess($extractRoot, "Extract driver pack ($ext)")) {
+            switch ($ext) {
+                ".zip" {
+                    Expand-Archive -LiteralPath $drvPath -DestinationPath $extractRoot -Force
+                    Write-Ok "Extracted ZIP to $extractRoot"
+                }
+                ".cab" {
+                    # expand.exe is available in WinPE/WinRE typically
+                    Invoke-Native -FilePath "expand.exe" -Arguments @(
+                        "-F:*", $drvPath, $extractRoot
+                    ) | Out-Null
+                    Write-Ok "Extracted CAB to $extractRoot"
+                }
+                default {
+                    Write-Warn "Unknown driver pack format '$ext'. Download complete, but extraction is not implemented for this type."
+                    Write-Warn "If this is an EXE-based vendor pack, consider publishing as ZIP/CAB or add a vendor-specific silent extract routine."
+                }
+            }
+        }
+
+        # Inject drivers offline (requires .inf files in extracted tree)
+        if ($PSCmdlet.ShouldProcess("W:\\", "DISM /Add-Driver /Recurse from $extractRoot")) {
+            Invoke-Native -FilePath "dism.exe" -Arguments @(
+                "/Image:W:\",
+                "/Add-Driver",
+                "/Driver:$extractRoot",
+                "/Recurse"
+            ) | Out-Null
+
+            Write-Ok "Offline driver injection complete."
+            # DISM /Add-Driver /Recurse guidance documented by Microsoft. [1](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/add-and-remove-drivers-to-an-offline-windows-image?view=windows-11)
+        }
+
+    } else {
+        Write-Warn "No driver pack was injected because a single best-match driver URL was not selected."
+    }
+
+    Start-Step "Finalizing and Displaying Summary"
+    Write-Ok "Build completed."
+    Write-Info "OS image: $osFileName (Index $osIndex)"
+    Write-Info ("Disk: #{0} -> EFI=S:, Windows=W:, Recovery=R:" -f $disk.Number)
+    Write-Info "Log file: $(Join-Path $script:TempRoot 'BuildForce.log')"
 
 } catch {
-    Write-Fail $_.Exception.Message
+    Write-Fail "Fatal error: $($_.Exception.Message)"
+    Write-Fail $_.ScriptStackTrace
     throw
 }
-$driverCatalog = Get-Catalog -CatalogUrl $DriverCatalogUrl
-$hw = Get-HardwareIdentity
-
-$result = Find-DriverPackMatch -Hardware $hw -DriverCatalog $driverCatalog
-
-if ($result.Matched) {
-    Write-Output ("URL:    {0}" -f $result.URL)
-    Write-Output ("URL:    {0}" -f $result.URL)
-
-}
-else {
-    Write-Output $result.Reason
-    $result.Candidates | Format-Table -AutoSize
-}
-
-Write-host "$hw"
