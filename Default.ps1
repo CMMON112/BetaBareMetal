@@ -743,7 +743,8 @@ if ($SkipDrivers -or -not $DriverSoftPaqUrl) {
 } else {
     $driverResult = Install-DriversOffline `
                         -SoftPaqUrl $DriverSoftPaqUrl `
-                        -WindowsPath "$WindowsDriveLetter\Windows"
+                        -WindowsPath (Join-Path $WindowsDriveLetter 'Windows')
+
 
     $buildResults['Drivers'] = $driverResult
 }
