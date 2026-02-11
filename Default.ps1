@@ -513,11 +513,7 @@ function Find-DriverPackMatch {
         [Parameter(Mandatory)]
         [object[]] $DriverCatalog,
 
-        # Optional: minimum score required to accept a match
-        [int] $MinScore = 6,
-
-        # Optional: include top N candidates even when a single best match exists
-        [int] $Top = 0
+        [int] $MinScore = 6
     )
 
     function Normalize([string]$s) {
@@ -540,11 +536,6 @@ function Find-DriverPackMatch {
         return $null
     }
 
-    function Tick([bool]$b) {
-        if ($b) { return '✓' } else { return '' }
-    }
-
-    # In case your CLIXML property names drift over time, list aliases here.
     $propMap = @{
         CSManufacturer = @('CSManufacturer','ComputerSystemManufacturer','CSMfr','ManufacturerCS')
         CSModel        = @('CSModel','ComputerSystemModel','CSProduct','ModelCS')
@@ -557,7 +548,6 @@ function Find-DriverPackMatch {
         Sha256         = @('Sha256','SHA256','HashSha256','SHA-256')
     }
 
-    # Normalize hardware fields once
     $hw = [pscustomobject]@{
         CSManufacturer = Normalize $Hardware.CSManufacturer
         CSModel        = Normalize $Hardware.CSModel
@@ -567,7 +557,6 @@ function Find-DriverPackMatch {
         BBProduct      = Normalize $Hardware.BBProduct
     }
 
-    # Weighting: tune as you like
     $weights = @{
         BBProduct      = 6
         BBSKU          = 6
@@ -577,7 +566,7 @@ function Find-DriverPackMatch {
         BBManufacturer = 2
     }
 
-    $penalty = 2  # mismatch penalty when both sides have a value
+    $penalty = 2
 
     $scored = foreach ($item in $DriverCatalog) {
 
@@ -588,117 +577,108 @@ function Find-DriverPackMatch {
             BBModel        = Normalize (Get-AnyPropValue $item $propMap.BBModel)
             BBSKU          = Normalize (Get-AnyPropValue $item $propMap.BBSKU)
             BBProduct      = Normalize (Get-AnyPropValue $item $propMap.BBProduct)
-
             URL            = Get-AnyPropValue $item $propMap.URL
             Sha1           = Get-AnyPropValue $item $propMap.Sha1
             Sha256         = Get-AnyPropValue $item $propMap.Sha256
         }
 
         $score = 0
-        $fieldMatch = @{}
+        $compared = 0
+        $exact = 0
+        $matchedFields = New-Object System.Collections.Generic.List[string]
 
         foreach ($k in $weights.Keys) {
             $hv = $hw.$k
             $ev = $entry.$k
 
-            # Only evaluate if both sides have values
             if ($null -ne $hv -and $null -ne $ev) {
+                $compared++
                 if ($hv -eq $ev) {
+                    $exact++
                     $score += $weights[$k]
-                    $fieldMatch[$k] = $true
-                }
-                else {
+                    $matchedFields.Add($k)
+                } else {
                     $score -= $penalty
-                    $fieldMatch[$k] = $false
                 }
             }
-            else {
-                $fieldMatch[$k] = $null  # not evaluated (one side missing)
-            }
-        }
-
-        # Candidate “display row” with ticks + key values for inspection
-        $candidateRow = [pscustomobject]@{
-            Score          = $score
-            CSManufacturer = (Tick ($fieldMatch['CSManufacturer'] -eq $true))
-            CSModel        = (Tick ($fieldMatch['CSModel'] -eq $true))
-            BBManufacturer = (Tick ($fieldMatch['BBManufacturer'] -eq $true))
-            BBModel        = (Tick ($fieldMatch['BBModel'] -eq $true))
-            BBSKU          = (Tick ($fieldMatch['BBSKU'] -eq $true))
-            BBProduct      = (Tick ($fieldMatch['BBProduct'] -eq $true))
-
-            URL            = $entry.URL
-            Sha1           = $entry.Sha1
-            Sha256         = $entry.Sha256
-
-            # Helpful context (optional – keep so you can see what it matched against)
-            _CSMfrValue     = $entry.CSManufacturer
-            _CSModelValue   = $entry.CSModel
-            _BBMfrValue     = $entry.BBManufacturer
-            _BBModelValue   = $entry.BBModel
-            _BBSKUValue     = $entry.BBSKU
-            _BBProdValue    = $entry.BBProduct
         }
 
         [pscustomobject]@{
-            Score     = $score
-            Entry     = $item
-            EntryView = $entry
-            Row       = $candidateRow
+            Score         = $score
+            Compared      = $compared
+            ExactMatches  = $exact
+            HasUrl        = [bool](-not [string]::IsNullOrWhiteSpace($entry.URL))
+            MatchedFields = $matchedFields -join ','
+            Entry         = $item
+            EntryView     = $entry
         }
     }
 
-    $bestScore = ($scored | Measure-Object -Property Score -Maximum).Maximum
-    $best      = $scored | Where-Object Score -eq $bestScore
-
-    # Helper: top candidate rows sorted by score desc
-    $topRows = $scored |
-        Sort-Object -Property Score -Descending |
-        Select-Object -First ([Math]::Max($Top, 0)) |
-        ForEach-Object { $_.Row }
-
-    # Reject weak matches
-    if ($null -eq $bestScore -or $bestScore -lt $MinScore -or $best.Count -eq 0) {
+    # If NOTHING was comparable, don’t claim a tie — it’s “no evidence”
+    if (($scored | Measure-Object -Property Compared -Maximum).Maximum -eq 0) {
         return [pscustomobject]@{
             Matched    = $false
-            Reason     = "No match met minimum score ($MinScore). BestScore=$bestScore"
+            Reason     = "No comparable fields (hardware or catalog values are null / not mapped)."
             Hardware   = $Hardware
-            Candidates = @(
-                $scored | Sort-Object Score -Descending | Select-Object -First 10 | ForEach-Object { $_.Row }
-            )
+            Candidates = $scored | Select Score,Compared,ExactMatches,HasUrl,MatchedFields
         }
     }
 
-    # If tie, return candidates with ticks
-    if ($best.Count -ne 1) {
+    # Deterministic best: score, then most exact matches, then most compared fields, then has URL
+    $ordered = $scored | Sort-Object Score, ExactMatches, Compared, HasUrl -Descending
+    $top = $ordered | Select-Object -First 1
+
+    # See if 2nd place is identical on all tie-break metrics
+    $second = $ordered | Select-Object -Skip 1 -First 1
+    $isTie = $false
+    if ($second) {
+        if ($second.Score -eq $top.Score -and
+            $second.ExactMatches -eq $top.ExactMatches -and
+            $second.Compared -eq $top.Compared -and
+            $second.HasUrl -eq $top.HasUrl) {
+            $isTie = $true
+        }
+    }
+
+    if ($top.Score -lt $MinScore) {
         return [pscustomobject]@{
             Matched    = $false
-            Reason     = "Multiple best matches (tie) at score $bestScore"
+            Reason     = "No match met minimum score ($MinScore). BestScore=$($top.Score)"
             Hardware   = $Hardware
-            Candidates = @(
-                $best | Sort-Object Score -Descending | ForEach-Object { $_.Row }
-            )
+            Candidates = $ordered | Select-Object -First 10 | Select Score,Compared,ExactMatches,HasUrl,MatchedFields,@{n='URL';e={$_.EntryView.URL}}
         }
     }
 
-    # Exactly one best match
-    $one = $best[0].EntryView
+    if ($isTie) {
+        # return all tied-at-top entries
+        $ties = $ordered | Where-Object {
+            $_.Score -eq $top.Score -and
+            $_.ExactMatches -eq $top.ExactMatches -and
+            $_.Compared -eq $top.Compared -and
+            $_.HasUrl -eq $top.HasUrl
+        }
 
-    $result = [pscustomobject]@{
+        return [pscustomobject]@{
+            Matched    = $false
+            Reason     = "Tie after tie-breakers at Score=$($top.Score) Exact=$($top.ExactMatches) Compared=$($top.Compared) HasUrl=$($top.HasUrl)"
+            Hardware   = $Hardware
+            Candidates = $ties | Select Score,Compared,ExactMatches,HasUrl,MatchedFields,@{n='URL';e={$_.EntryView.URL}}
+        }
+    }
+
+    # Single winner
+    $one = $top.EntryView
+    return [pscustomobject]@{
         Matched   = $true
-        Score     = $bestScore
+        Score     = $top.Score
+        Compared  = $top.Compared
+        Exact     = $top.ExactMatches
         Hardware  = $Hardware
         URL       = $one.URL
         Sha1      = $one.Sha1
         Sha256    = $one.Sha256
+        MatchInfo = $top.MatchedFields
     }
-
-    # Optionally attach Top candidates for logging/visibility
-    if ($Top -gt 0) {
-        $result | Add-Member -NotePropertyName Candidates -NotePropertyValue $topRows
-    }
-
-    return $result
 }
 
 
