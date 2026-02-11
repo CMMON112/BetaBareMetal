@@ -689,20 +689,13 @@ try {
     Write-Ok "Selected OS entry:"
     $osEntry | Format-List * | Out-String | ForEach-Object { Write-Info $_.TrimEnd() }
 
-
-    # From here, you would typically:
-    # - Download the ISO/WIM/ESD referenced by $osEntry
-    # - Select a target disk via Get-TargetDisk
-    # - Apply New-UEFIPartitionLayout -DiskNumber $disk.Number
-    # - Apply image, inject drivers, configure BCD, etc.
-
     Write-Ok "Script baseline checks complete."
 
 } catch {
     Write-Fail $_.Exception.Message
     throw
 }
-$driverCatalog = Get-OSCatalog -CatalogUrl $DriverCatalogUrl   # your existing downloader/importer
+$driverCatalog = Get-Catalog -CatalogUrl $DriverCatalogUrl
 $hw = Get-HardwareIdentity
 
 $result = Find-DriverPackMatch -Hardware $hw -DriverCatalog $driverCatalog
