@@ -761,20 +761,31 @@ Invoke-Step "14) Select desired index (Windows 11 $SKU)" {
 }
 
 Invoke-Step "15) Apply selected index to W:\" {
+
     $already = Test-Path -LiteralPath 'W:\Windows\System32'
     if ($already -and -not $ForceApplyImage) {
         Write-Log "W:\Windows already present. Skipping apply-image (use -ForceApplyImage to reapply)." 'INFO'
         return
     }
 
-    if ($PSCmdlet.ShouldProcess("W:\", "DISM Apply-Image (Index $($script:SelectedIndex))")) {
-        Invoke-Native -FilePath "dism.exe" -Arguments @(
-            "/Apply-Image",
-            "/ImageFile:$($script:OsPath)",
-            "/Index:$($script:SelectedIndex)",
-            "/ApplyDir:W:\"
-        ) | Out-Null
-        Write-Log "Windows image applied to W:\" 'OK'
+    # Ensure DISM PowerShell cmdlets are available (PowerShell-only, no dism.exe)
+    if (-not (Get-Command -Name Apply-WindowsImage -ErrorAction SilentlyContinue)) {
+        try {
+            Import-Module Dism -ErrorAction Stop
+        } catch {
+            throw "Apply-WindowsImage cmdlet not available (Dism module missing). Cannot apply image without dism.exe."
+        }
+    }
+
+    if ($PSCmdlet.ShouldProcess("W:\", "Apply-WindowsImage (Index $($script:SelectedIndex))")) {
+
+        # Apply the selected index to W:\
+        Apply-WindowsImage -ImagePath $script:OsPath `
+                           -Index $script:SelectedIndex `
+                           -ApplyPath 'W:\' `
+                           -ErrorAction Stop | Out-Null
+
+        Write-Log "Windows image applied to W:\ (PowerShell Apply-WindowsImage)" 'OK'
     }
 }
 
