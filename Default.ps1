@@ -514,12 +514,14 @@ function Find-DriverPackMatch {
         [object[]] $DriverCatalog,
 
         # Optional: minimum score required to accept a match
-        [int] $MinScore = 6
+        [int] $MinScore = 6,
+
+        # Optional: include top N candidates even when a single best match exists
+        [int] $Top = 0
     )
 
     function Normalize([string]$s) {
         if ([string]::IsNullOrWhiteSpace($s)) { return $null }
-        # collapse whitespace + uppercase
         return (($s -replace '\s+', ' ').Trim()).ToUpperInvariant()
     }
 
@@ -529,7 +531,6 @@ function Find-DriverPackMatch {
             [Parameter(Mandatory)] [string[]] $Names
         )
         foreach ($n in $Names) {
-            # support dynamic properties
             $p = $Obj.PSObject.Properties[$n]
             if ($p) {
                 $v = $p.Value
@@ -537,6 +538,10 @@ function Find-DriverPackMatch {
             }
         }
         return $null
+    }
+
+    function Tick([bool]$b) {
+        if ($b) { return '✓' } else { return '' }
     }
 
     # In case your CLIXML property names drift over time, list aliases here.
@@ -590,74 +595,110 @@ function Find-DriverPackMatch {
         }
 
         $score = 0
-        $matchedFields = New-Object System.Collections.Generic.List[string]
+        $fieldMatch = @{}
 
         foreach ($k in $weights.Keys) {
             $hv = $hw.$k
             $ev = $entry.$k
 
+            # Only evaluate if both sides have values
             if ($null -ne $hv -and $null -ne $ev) {
                 if ($hv -eq $ev) {
                     $score += $weights[$k]
-                    $matchedFields.Add($k)
+                    $fieldMatch[$k] = $true
                 }
                 else {
                     $score -= $penalty
+                    $fieldMatch[$k] = $false
                 }
+            }
+            else {
+                $fieldMatch[$k] = $null  # not evaluated (one side missing)
             }
         }
 
+        # Candidate “display row” with ticks + key values for inspection
+        $candidateRow = [pscustomobject]@{
+            Score          = $score
+            CSManufacturer = (Tick ($fieldMatch['CSManufacturer'] -eq $true))
+            CSModel        = (Tick ($fieldMatch['CSModel'] -eq $true))
+            BBManufacturer = (Tick ($fieldMatch['BBManufacturer'] -eq $true))
+            BBModel        = (Tick ($fieldMatch['BBModel'] -eq $true))
+            BBSKU          = (Tick ($fieldMatch['BBSKU'] -eq $true))
+            BBProduct      = (Tick ($fieldMatch['BBProduct'] -eq $true))
+
+            URL            = $entry.URL
+            Sha1           = $entry.Sha1
+            Sha256         = $entry.Sha256
+
+            # Helpful context (optional – keep so you can see what it matched against)
+            _CSMfrValue     = $entry.CSManufacturer
+            _CSModelValue   = $entry.CSModel
+            _BBMfrValue     = $entry.BBManufacturer
+            _BBModelValue   = $entry.BBModel
+            _BBSKUValue     = $entry.BBSKU
+            _BBProdValue    = $entry.BBProduct
+        }
+
         [pscustomobject]@{
-            Score         = $score
-            MatchedFields = $matchedFields -join ','
-            Entry         = $item
-            EntryView     = $entry
+            Score     = $score
+            Entry     = $item
+            EntryView = $entry
+            Row       = $candidateRow
         }
     }
 
     $bestScore = ($scored | Measure-Object -Property Score -Maximum).Maximum
     $best      = $scored | Where-Object Score -eq $bestScore
 
+    # Helper: top candidate rows sorted by score desc
+    $topRows = $scored |
+        Sort-Object -Property Score -Descending |
+        Select-Object -First ([Math]::Max($Top, 0)) |
+        ForEach-Object { $_.Row }
+
     # Reject weak matches
     if ($null -eq $bestScore -or $bestScore -lt $MinScore -or $best.Count -eq 0) {
         return [pscustomobject]@{
-            Matched      = $false
-            Reason       = "No match met minimum score ($MinScore). BestScore=$bestScore"
-            Hardware     = $Hardware
-            Candidates   = @()
+            Matched    = $false
+            Reason     = "No match met minimum score ($MinScore). BestScore=$bestScore"
+            Hardware   = $Hardware
+            Candidates = @(
+                $scored | Sort-Object Score -Descending | Select-Object -First 10 | ForEach-Object { $_.Row }
+            )
         }
     }
 
-    # If tie, return candidates (so you can log/inspect)
+    # If tie, return candidates with ticks
     if ($best.Count -ne 1) {
         return [pscustomobject]@{
             Matched    = $false
             Reason     = "Multiple best matches (tie) at score $bestScore"
             Hardware   = $Hardware
-            Candidates = $best | Select-Object Score, MatchedFields, @{n='URL';e={$_.EntryView.URL}}, @{n='Sha1';e={$_.EntryView.Sha1}}, @{n='Sha256';e={$_.EntryView.Sha256}}
+            Candidates = @(
+                $best | Sort-Object Score -Descending | ForEach-Object { $_.Row }
+            )
         }
     }
 
-    # Exactly one best match: return URL + hashes if present
+    # Exactly one best match
     $one = $best[0].EntryView
-    return [pscustomobject]@{
+
+    $result = [pscustomobject]@{
         Matched   = $true
         Score     = $bestScore
         Hardware  = $Hardware
         URL       = $one.URL
         Sha1      = $one.Sha1
         Sha256    = $one.Sha256
-        # Optional: include what matched for traceability
-        MatchInfo = [pscustomobject]@{
-            MatchedFields = $best[0].MatchedFields
-            CSManufacturer = $one.CSManufacturer
-            CSModel        = $one.CSModel
-            BBManufacturer = $one.BBManufacturer
-            BBModel        = $one.BBModel
-            BBSKU          = $one.BBSKU
-            BBProduct      = $one.BBProduct
-        }
     }
+
+    # Optionally attach Top candidates for logging/visibility
+    if ($Top -gt 0) {
+        $result | Add-Member -NotePropertyName Candidates -NotePropertyValue $topRows
+    }
+
+    return $result
 }
 
 
