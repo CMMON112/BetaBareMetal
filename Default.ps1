@@ -30,6 +30,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
+# StrictMode-safe script-scope initialization
+$script:BuildForgeRoot = $null
+$script:Hardware       = $null
+$script:OSCatalog       = $null
+$script:DriverCatalog   = $null
+$script:OsEntry         = $null
+$script:OsUrl           = $null
+$script:OsSha1          = $null
+$script:OsSha256        = $null
+$script:OsPath          = $null
+$script:DriverMatch     = $null
+$script:DriverPackPath  = $null
+$script:DriverExtractDir= $null
+$script:TargetDisk      = $null
+$script:ImageIndexes    = $null
+$script:SelectedIndex   = $null
 
 # ---------------------------
 # Fixed logging location (never moves)
