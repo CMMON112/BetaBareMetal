@@ -632,8 +632,9 @@ function Install-DriversOffline {
 
     Write-Info "Preparing offline driver installation into $WindowsPath..."
 
-    $tempRoot   = Get-TempRoot
-    $driverDir  = Join-Path $tempRoot "Drivers"
+    # Use the actual OS volume instead of WinPE RAM disk
+    $osVolume = Split-Path $WindowsPath -Qualifier
+    $driverDir  = Join-Path $osVolume "BuildOSD\Drivers"
     $softPaqExe = Join-Path $driverDir "SoftPaq.exe"
     $extractDir = Join-Path $driverDir "Extracted"
 
@@ -642,7 +643,7 @@ function Install-DriversOffline {
 
     Invoke-FileDownload -Url $SoftPaqUrl -DestPath $softPaqExe
 
-    Write-Info "Extracting SoftPaq..."
+    Write-Info "Extracting SoftPaq to $extractDir..."
     & $softPaqExe "/s" "/e" "/f`"$extractDir`""
     if ($LASTEXITCODE -ne 0) {
         throw "SoftPaq extraction failed with exit code $LASTEXITCODE."
@@ -664,6 +665,7 @@ function Install-DriversOffline {
     Write-Ok "Drivers injected successfully."
     return "Drivers injected from SoftPaq."
 }
+
 
 Show-Banner
 
