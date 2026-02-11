@@ -720,6 +720,9 @@ function Find-DriverPackMatch {
 }
 
 
+function Invoke-BuildForge {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
 
 # ---------------------------
 # MAIN (fleshed out)
@@ -1012,3 +1015,7 @@ try {
     Write-Fail $_.ScriptStackTrace
     throw
 }
+
+}
+
+Invoke-BuildForge
