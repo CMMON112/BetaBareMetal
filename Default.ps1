@@ -110,10 +110,8 @@ function Write-Status {
         [string] $Level = 'INFO'
     )
 
-    # Ensure temp root is always initialized before logging
-    if (-not $script:TempRoot) {
-        $script:TempRoot = Get-TempRoot
-    }
+# Ensure temp root is always initialized, and allow promotion when better drive appears
+$script:TempRoot = Get-TempRoot
 
     # Map log level → console prefix + color
     switch ($Level) {
@@ -396,7 +394,7 @@ function New-UEFIPartitionLayout {
         [Parameter(Mandatory)]
         [int]$DiskNumber,
 
-        [int]$RecoverySizeMB = 500,
+        [int]$RecoverySizeMB = 750,
         [int]$EfiSizeMB = 200
     )
 
