@@ -36,10 +36,10 @@ $script:TotalSteps  = 6
 # ---------------------------
 
 function Get-TempRoot {
-    $cTemp = 'C:\Windows\Temp\BuildForce'
-    $xTemp = 'X:\Windows\Temp\BuildForce'
+    $cTemp = 'C:\Windows\Temp\BuildForge'
+    $xTemp = 'X:\Windows\Temp\BuildForge'
 
-    # If C:\Windows exists, prefer C:\Windows\Temp\BuildForce
+    # If C:\Windows exists, prefer C:\Windows\Temp\BuildForge
     if (Test-Path -LiteralPath 'C:\Windows') {
 
         # If X exists and C doesn't, migrate X -> C first (previously unreachable)
@@ -48,7 +48,7 @@ function Get-TempRoot {
             Move-Item -LiteralPath $xTemp -Destination $cTemp -Force
         }
 
-        # Ensure the C:\Windows\Temp\BuildForce directory exists
+        # Ensure the C:\Windows\Temp\BuildForge directory exists
         if (-not (Test-Path -LiteralPath $cTemp)) {
             New-Item -ItemType Directory -Path $cTemp -Force | Out-Null
         }
@@ -56,7 +56,7 @@ function Get-TempRoot {
         return $cTemp
     }
 
-    # If C:\Windows does NOT exist, ensure X:\Windows\Temp\BuildForce exists
+    # If C:\Windows does NOT exist, ensure X:\Windows\Temp\BuildForge exists
     if (-not (Test-Path -LiteralPath $xTemp)) {
         New-Item -ItemType Directory -Path $xTemp -Force | Out-Null
     }
@@ -394,10 +394,10 @@ function New-UEFIPartitionLayout {
 }
 
 # ---------------------------
-# OS Catalog handling (FIXED: correct variable usage + explicit catalog passing)
+# Catalog Handling
 # ---------------------------
 
-function Get-OSCatalog {
+function Get-Catalog {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
