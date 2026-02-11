@@ -23,7 +23,7 @@ param(
 
     # Optional targeting & rerun controls
     [int]    $TargetDiskNumber = -1,
-    [switch] $ForceRepartition = $true,
+    [bool] $ForceRepartition = $true,
     [switch] $ForceRedownload,
     [switch] $ForceApplyImage
 )
