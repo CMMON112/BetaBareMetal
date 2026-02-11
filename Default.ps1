@@ -469,54 +469,102 @@ function Apply-UEFIPartitionLayout {
 # ESD index discovery & selection
 # ---------------------------
 function Get-ImageIndexesFromEsd {
-    param([Parameter(Mandatory)][string]$ImageFile)
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $ImageFile
+    )
 
-    $r = Invoke-Native -FilePath "dism.exe" -Arguments @("/Get-ImageInfo","/ImageFile:$ImageFile")
-    $lines = $r.StdOut -split "`r?`n"
+    if (-not (Test-Path -LiteralPath $ImageFile)) {
+        throw "Image file not found: $ImageFile"
+    }
 
-    $list = New-Object System.Collections.Generic.List[object]
-    $curIndex = $null
-    $curName  = $null
-
-    foreach ($ln in $lines) {
-        if ($ln -match '^\s*Index\s*:\s*(\d+)\s*$') { $curIndex = [int]$Matches[1]; continue }
-        if ($ln -match '^\s*Name\s*:\s*(.+?)\s*$') {
-            $curName = $Matches[1].Trim()
-            if ($curIndex -ne $null) {
-                $list.Add([pscustomobject]@{ Index=$curIndex; Name=$curName })
-                $curIndex = $null; $curName = $null
-            }
+    # PowerShell-only: requires DISM PowerShell module cmdlets (no dism.exe usage)
+    if (-not (Get-Command -Name Get-WindowsImage -ErrorAction SilentlyContinue)) {
+        try { Import-Module Dism -ErrorAction Stop } catch {
+            throw "Get-WindowsImage is not available (Dism module missing). Cannot enumerate ESD/WIM without dism.exe."
         }
     }
+
+    $images = Get-WindowsImage -ImagePath $ImageFile -ErrorAction Stop
+
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($img in $images) {
+
+        $idx  = $img.ImageIndex; if (-not $idx)  { $idx  = $img.Index }
+        $name = $img.ImageName;  if (-not $name) { $name = $img.Name }
+
+        if (-not $idx -or -not $name) { continue }
+
+        # Exclude " N" editions (case-insensitive), e.g. "Windows 11 Pro N"
+        if ($name -match '(?i)\sN$') { continue }
+
+        $list.Add([pscustomobject]@{
+            Index = [int]$idx
+            Name  = [string]$name
+        })
+    }
+
     return $list
 }
 
 function Select-DesiredIndex {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][object[]]$Indexes
+        [Parameter(Mandatory)]
+        [object[]] $Indexes
     )
 
+    if (-not $Indexes -or $Indexes.Count -eq 0) {
+        throw "Select-DesiredIndex: No indexes were provided."
+    }
+
+    # Filter out " N" editions defensively (in case caller didn't)
+    $clean = $Indexes | Where-Object { $_.Name -and $_.Name -notmatch '(?i)\sN$' }
+
+    if (-not $clean -or $clean.Count -eq 0) {
+        throw "Select-DesiredIndex: All discovered images were N editions (or had no Name)."
+    }
+
+    # Exact target names (non-N only)
     $desired = switch ($SKU) {
-        'Enterprise'    { 'Windows 11 Enterprise' }
-        'Professional'  { 'Windows 11 Pro' }
+        'Enterprise'   { 'Windows 11 Enterprise' }
+        'Professional' { 'Windows 11 Pro' }
+        default        { throw "Select-DesiredIndex: Unsupported SKU '$SKU'." }
     }
 
-    # Prefer exact match
-    $exact = $Indexes | Where-Object { $_.Name -eq $desired } | Select-Object -First 1
-    if ($exact) { return $exact.Index }
+    # 1) Prefer exact match (case-insensitive)
+    $exact = $clean | Where-Object {
+        $_.Name.Equals($desired, [System.StringComparison]::OrdinalIgnoreCase)
+    } | Select-Object -First 1
+    if ($exact) { return [int]$exact.Index }
 
-    # Fallback: match common Pro naming variants
+    # 2) Fallback for Pro: some media calls it "Windows 11 Professional"
     if ($SKU -eq 'Professional') {
-        $alt = $Indexes | Where-Object { $_.Name -match '^Windows 11 (Pro|Professional)\b' } | Select-Object -First 1
-        if ($alt) { return $alt.Index }
+        $alt = $clean | Where-Object {
+            $_.Name.Equals('Windows 11 Professional', [System.StringComparison]::OrdinalIgnoreCase) -or
+            $_.Name -match '(?i)^Windows 11 Professional(\b|$)'
+        } | Select-Object -First 1
+        if ($alt) { return [int]$alt.Index }
     }
 
-    # Fallback: contains Enterprise/Pro
-    $contains = $Indexes | Where-Object { $_.Name -match $SKU } | Select-Object -First 1
-    if ($contains) { return $contains.Index }
+    # 3) Fallback: "starts with" desired (still excludes N due to $clean)
+    $starts = $clean | Where-Object {
+        $_.Name.StartsWith($desired, [System.StringComparison]::OrdinalIgnoreCase)
+    } | Select-Object -First 1
+    if ($starts) { return [int]$starts.Index }
 
-    throw "Could not find a suitable index for SKU='$SKU'."
+    # 4) Last resort: contain token (Enterprise / Pro) but still non-N
+    $token = if ($SKU -eq 'Enterprise') { 'Enterprise' } else { 'Pro' }
+    $contains = $clean | Where-Object {
+        $_.Name -match "(?i)\b$token\b"
+    } | Select-Object -First 1
+    if ($contains) { return [int]$contains.Index }
+
+    $names = ($clean | ForEach-Object { "Index=$($_.Index) Name=$($_.Name)" }) -join "; "
+    throw "Could not find a suitable NON-N index for SKU='$SKU'. Available (non-N): $names"
 }
+
 
 # ---------------------------
 # HP SoftPaq extractor + wait-for-child-procs
