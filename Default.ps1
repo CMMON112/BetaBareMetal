@@ -734,3 +734,5 @@ else {
     Write-Output $result.Reason
     $result.Candidates | Format-Table -AutoSize
 }
+$Hardware | Format-List CSManufacturer,CSModel,BBManufacturer,BBModel,BBSKU,BBProduct
+$DriverCatalog[0] | Format-List *
