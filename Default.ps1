@@ -63,12 +63,14 @@ function Initialize-Logging {
 
 function Write-Log {
     param(
-        [Parameter(Mandatory)][string]$Message,
-        [ValidateSet('INFO','WARN','ERROR','OK','STEP')][string]$Level='INFO'
+        [AllowEmptyString()]
+        [string] $Message,
+
+        [ValidateSet('INFO','WARN','ERROR','OK','STEP')]
+        [string] $Level = 'INFO'
     )
 
-    
-    # --- Fix: tolerate empty/whitespace log lines (common from native tools) ---
+    # Skip empty/whitespace messages safely
     if ([string]::IsNullOrWhiteSpace($Message)) { return }
 
     Initialize-Logging
@@ -76,14 +78,14 @@ function Write-Log {
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     $line = "$ts [$Level] $Message"
 
-    # Console coloring
     $color = switch ($Level) {
-        'STEP' {'Cyan'}
-        'OK'   {'Green'}
-        'WARN' {'Yellow'}
-        'ERROR'{'Red'}
-        default{'Gray'}
+        'STEP'  { 'Cyan' }
+        'OK'    { 'Green' }
+        'WARN'  { 'Yellow' }
+        'ERROR' { 'Red' }
+        default { 'Gray' }
     }
+
     Write-Host "[$Level] $Message" -ForegroundColor $color
     [System.IO.File]::AppendAllText($script:LogFile, $line + "`r`n")
 }
