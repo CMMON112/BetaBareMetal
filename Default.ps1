@@ -36,7 +36,7 @@ $script:TotalSteps  = 6
 # ---------------------------
 
 function Get-TempRoot {
-    # Candidate locations
+
     $xRoot         = 'X:\Windows\Temp\BuildForge'
     $wRootNoWin    = 'W:\BuildForge'
     $wRootWinTemp  = 'W:\Windows\Temp\BuildForge'
@@ -48,56 +48,46 @@ function Get-TempRoot {
     }
 
     function Move-BuildForgeContents([string]$Source, [string]$Destination) {
-        if (-not (Test-Path -LiteralPath $Source)) { return }
+        # Best-effort only — never throw
+        try {
+            if (-not (Test-Path -LiteralPath $Source)) { return }
+            Ensure-Dir $Destination
 
-        Ensure-Dir $Destination
-
-        # Merge contents from Source into Destination safely (works even if Destination exists)
-        $items = Get-ChildItem -LiteralPath $Source -Force -ErrorAction SilentlyContinue
-        foreach ($i in $items) {
-            $destPath = Join-Path $Destination $i.Name
-            try {
-                Move-Item -LiteralPath $i.FullName -Destination $destPath -Force -ErrorAction Stop
-            } catch {
-                # If something is locked or collides, try moving into the destination root.
-                Move-Item -LiteralPath $i.FullName -Destination $Destination -Force -ErrorAction SilentlyContinue
+            $items = Get-ChildItem -LiteralPath $Source -Force -ErrorAction SilentlyContinue
+            foreach ($i in $items) {
+                $destPath = Join-Path $Destination $i.Name
+                Move-Item -LiteralPath $i.FullName -Destination $destPath -Force -ErrorAction SilentlyContinue
             }
+
+            Remove-Item -LiteralPath $Source -Force -Recurse -ErrorAction SilentlyContinue
+        } catch {
+            # swallow
+        }
+    }
+
+    $hasW    = Test-Path -LiteralPath 'W:\'
+    $hasWWin = Test-Path -LiteralPath 'W:\Windows'
+    $hasX    = Test-Path -LiteralPath 'X:\'
+
+    # Prefer W: as soon as it exists (bigger than X: RAM drive)
+    if ($hasW) {
+        if ($hasWWin) {
+            Ensure-Dir $wRootWinTemp
+            Move-BuildForgeContents -Source $xRoot      -Destination $wRootWinTemp
+            Move-BuildForgeContents -Source $wRootNoWin -Destination $wRootWinTemp
+            return $wRootWinTemp
         }
 
-        # Remove the (now empty) source folder if possible
-        Remove-Item -LiteralPath $Source -Force -Recurse -ErrorAction SilentlyContinue
-    }
-
-    $hasX       = Test-Path -LiteralPath 'X:\'
-    $hasW       = Test-Path -LiteralPath 'W:\'
-    $hasWWin    = Test-Path -LiteralPath 'W:\Windows'
-
-    # 3) If W:\Windows exists, move BuildForge to W:\Windows\Temp\BuildForge
-    if ($hasWWin) {
-        Ensure-Dir $wRootWinTemp
-
-        # Promote anything previously written elsewhere into the best location
-        Move-BuildForgeContents -Source $xRoot      -Destination $wRootWinTemp
-        Move-BuildForgeContents -Source $wRootNoWin -Destination $wRootWinTemp
-
-        return $wRootWinTemp
-    }
-
-    # 2) If W:\ and X:\ exist but W:\Windows does not,
-    #    create and move the contents of X:\Windows\Temp\BuildForge -> W:\BuildForge
-    if ($hasW -and $hasX -and -not $hasWWin) {
         Ensure-Dir $wRootNoWin
         Move-BuildForgeContents -Source $xRoot -Destination $wRootNoWin
         return $wRootNoWin
     }
 
-    # 1) If X:\ is available create the BuildForge folder in X:\Windows\Temp
     if ($hasX) {
         Ensure-Dir $xRoot
         return $xRoot
     }
 
-    # No valid temp drive available
     throw "Get-TempRoot: Neither X:\ nor W:\ is available to host BuildForge temp logs."
 }
 
@@ -110,10 +100,17 @@ function Write-Status {
         [string] $Level = 'INFO'
     )
 
-# Ensure temp root is always initialized, and allow promotion when better drive appears
-$script:TempRoot = Get-TempRoot
+    # Always re-evaluate TempRoot; diskpart reruns can invalidate old paths
+    try {
+        $script:TempRoot = Get-TempRoot
+    } catch {
+        # Worst case fallback
+        $script:TempRoot = 'X:\Windows\Temp\BuildForge'
+        if (-not (Test-Path -LiteralPath $script:TempRoot)) {
+            New-Item -ItemType Directory -Path $script:TempRoot -Force | Out-Null
+        }
+    }
 
-    # Map log level → console prefix + color
     switch ($Level) {
         'INFO'    { $prefix = 'INFO';    $color = 'Gray' }
         'WARN'    { $prefix = 'WARN';    $color = 'Yellow' }
@@ -122,21 +119,38 @@ $script:TempRoot = Get-TempRoot
         'STEP'    { $prefix = 'STEP';    $color = 'Cyan' }
     }
 
-    # Console output
     Write-Host ("  [{0}]    {1}" -f $prefix, $Message) -ForegroundColor $color
 
-    # Ensure log directory exists
-    if (-not (Test-Path -LiteralPath $script:TempRoot)) {
-        New-Item -ItemType Directory -Path $script:TempRoot -Force | Out-Null
-    }
-
-    # Log file path
-    $logFile = Join-Path $script:TempRoot 'BuildForce.log'
-
-    # Log entry
+    $logFile   = Join-Path $script:TempRoot 'BuildForce.log'
     $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    Add-Content -Path $logFile -Value "$timestamp [$Level] $Message"
+    $line      = "$timestamp [$Level] $Message"
+
+    # Ensure directory exists, ensure log file exists, retry once if it disappears mid-write
+    for ($i = 0; $i -lt 2; $i++) {
+        try {
+            if (-not (Test-Path -LiteralPath $script:TempRoot)) {
+                New-Item -ItemType Directory -Path $script:TempRoot -Force | Out-Null
+            }
+
+            if (-not (Test-Path -LiteralPath $logFile)) {
+                New-Item -ItemType File -Path $logFile -Force | Out-Null
+            }
+
+            Add-Content -Path $logFile -Value $line
+            break
+        } catch {
+            # TempRoot may have vanished; re-resolve once
+            if ($i -eq 0) {
+                try { $script:TempRoot = Get-TempRoot } catch { }
+                $logFile = Join-Path $script:TempRoot 'BuildForce.log'
+                Start-Sleep -Milliseconds 50
+                continue
+            }
+            # On second failure, don't crash the whole build just because logging failed
+        }
+    }
 }
+``
 
 # Convenience wrappers
 function Write-Info  { param([string] $Message) Write-Status -Message $Message -Level INFO }
@@ -145,13 +159,9 @@ function Write-Fail  { param([string] $Message) Write-Status -Message $Message -
 function Write-Ok    { param([string] $Message) Write-Status -Message $Message -Level SUCCESS }
 
 function Write-Divider {
-    # Prevent double-console printing (was happening before when calling Write-Status inside)
     $line = "─" * 72
     Write-Host $line -ForegroundColor DarkGray
-    if (-not $script:TempRoot) { $script:TempRoot = Get-TempRoot }
-    $logFile = Join-Path $script:TempRoot 'BuildForce.log'
-    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    Add-Content -Path $logFile -Value "$timestamp [INFO] $line"
+    Write-Status -Message $line -Level INFO
 }
 
 function Start-Step {
