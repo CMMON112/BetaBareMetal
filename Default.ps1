@@ -664,5 +664,22 @@ function Invoke-BuildForge {
         throw
     }
 }
+$requiredFunctions = @(
+    'Get-TempRoot',
+    'Write-Status',
+    'Get-Catalog',
+    'Resolve-OsCatalogEntry',
+    'Get-HardwareIdentity',
+    'Get-TargetDisk',
+    'New-UEFIPartitionLayout',
+    'Get-IndexByExactName',
+    'Apply-Image',
+    'Get-CacheRoot'
+)
 
+$missing = $requiredFunctions | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) }
+
+if ($missing) {
+    throw "Missing required functions: $($missing -join ', ')"
+}
 Invoke-BuildForge
