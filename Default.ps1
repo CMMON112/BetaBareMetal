@@ -632,7 +632,11 @@ function Install-DriversOffline {
 
     Write-Info "Preparing offline driver installation into $WindowsPath..."
 
-    # Use the actual OS volume instead of WinPE RAM disk
+    # Normalize Windows path
+    $WindowsPath = (Resolve-Path $WindowsPath).ProviderPath
+    Write-Info "Resolved Windows path: $WindowsPath"
+
+    # Use OS volume for extraction
     $osVolume = Split-Path $WindowsPath -Qualifier
     $driverDir  = Join-Path $osVolume "BuildOSD\Drivers"
     $softPaqExe = Join-Path $driverDir "SoftPaq.exe"
@@ -649,22 +653,13 @@ function Install-DriversOffline {
         throw "SoftPaq extraction failed with exit code $LASTEXITCODE."
     }
 
-    Write-Info "Injecting drivers into offline image at $WindowsPath..."
-    $args = @(
-        "/Image:$WindowsPath",
-        "/Add-Driver",
-        "/Driver:$extractDir",
-        "/Recurse"
-    )
-
-    $proc = Start-Process -FilePath dism.exe -ArgumentList $args -Wait -PassThru -NoNewWindow
-    if ($proc.ExitCode -ne 0) {
-        throw "DISM driver injection failed with exit code $($proc.ExitCode)."
-    }
+    Write-Info "Injecting drivers using Add-WindowsDriver..."
+    Add-WindowsDriver -Path $WindowsPath -Driver $extractDir -Recurse -ErrorAction Stop
 
     Write-Ok "Drivers injected successfully."
     return "Drivers injected from SoftPaq."
 }
+
 
 
 Show-Banner
