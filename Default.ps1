@@ -444,7 +444,7 @@ function New-MsrPartition {
 function New-WindowsPartition {
     <#
         Creates the Windows partition using all remaining space.
-        Assigns drive letter C: (relocating it if something else grabbed it).
+        Assigns drive letter W: (WinPE owns C:).
         Returns the partition object.
     #>
     param([Parameter(Mandatory)] [int] $DiskNumber)
@@ -455,38 +455,29 @@ function New-WindowsPartition {
                               -GptType '{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}' `
                               -AssignDriveLetter
 
-    # WinPE sometimes steals C: – move it away so we can claim it
-    $existing = Get-Partition -DriveLetter C -ErrorAction SilentlyContinue
-    if ($existing -and ($existing.PartitionNumber -ne $windows.PartitionNumber)) {
-        Write-Warn "C: is occupied by another partition – relocating it..."
-        Remove-PartitionAccessPath -DiskNumber $existing.DiskNumber `
-                                   -PartitionNumber $existing.PartitionNumber `
-                                   -AccessPath 'C:\' -ErrorAction SilentlyContinue
-    }
-
-    Format-Volume -Partition $windows -FileSystem NTFS -NewFileSystemLabel 'Windows' `
-                  -Confirm:$false -Force | Out-Null
+    # WinPE always owns C:, so force W:
+    Write-Info "Assigning Windows partition to W: (C: is reserved by WinPE)..."
     Set-Partition -DiskNumber $windows.DiskNumber `
                   -PartitionNumber $windows.PartitionNumber `
-                  -NewDriveLetter C | Out-Null
+                  -NewDriveLetter W | Out-Null
 
-    Write-Ok "Windows partition created and mounted as C:."
+    Format-Volume -DriveLetter W -FileSystem NTFS -NewFileSystemLabel 'Windows' `
+                  -Confirm:$false -Force | Out-Null
+
+    Write-Ok "Windows partition created and mounted as W:."
     return Get-Partition -DiskNumber $DiskNumber -PartitionNumber $windows.PartitionNumber
 }
 
+
 function Resize-WindowsForRecovery {
-    <#
-        Shrinks the Windows partition by 750 MB to make room for a Recovery partition
-        at the physical end of the disk (required for WinRE compatibility).
-    #>
     param(
         [Parameter(Mandatory)] [int] $DiskNumber,
         [Parameter(Mandatory)] [int] $PartitionNumber,
         [long] $ShrinkByBytes = 750MB
     )
 
-    $part      = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber
-    $supported = Get-PartitionSupportedSize -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber
+    $part       = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber
+    $supported  = Get-PartitionSupportedSize -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber
     $targetSize = [math]::Max($supported.SizeMin, ($part.Size - $ShrinkByBytes))
 
     if ($targetSize -ge $part.Size) {
@@ -494,11 +485,12 @@ function Resize-WindowsForRecovery {
         return $false
     }
 
-    Write-Info ("Shrinking Windows partition by {0} MB to make room for Recovery..." -f [math]::Round($ShrinkByBytes / 1MB))
+    Write-Info ("Shrinking Windows partition by {0} MB..." -f [math]::Round($ShrinkByBytes / 1MB))
     Resize-Partition -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber -Size $targetSize
     Write-Ok "Windows partition resized."
     return $true
 }
+
 
 function New-RecoveryPartition {
     <#  Creates a 750 MB WinRE Recovery partition at the end of the disk.  #>
@@ -517,17 +509,13 @@ function New-RecoveryPartition {
 }
 
 function Initialize-DiskLayout {
-    <#
-    .SYNOPSIS
-        Orchestrates the full Windows 11 GPT layout: ESP → MSR → Windows → Recovery.
-    #>
     param([Parameter(Mandatory)] [int] $DiskNumber)
 
     Write-Info "Laying out Windows 11 UEFI/GPT partition scheme on Disk $DiskNumber..."
-    Write-Info "  [1/4]  ESP     –  100 MB  FAT32"
-    Write-Info "  [2/4]  MSR     –   16 MB  (unformatted)"
-    Write-Info "  [3/4]  Windows –  max     NTFS  (shrunk by 750 MB)"
-    Write-Info "  [4/4]  Recovery–  750 MB  NTFS"
+    Write-Info "  [1/4]  ESP     – 100 MB FAT32"
+    Write-Info "  [2/4]  MSR     – 16 MB"
+    Write-Info "  [3/4]  Windows – NTFS (mounted as W:)"
+    Write-Info "  [4/4]  Recovery– 750 MB"
     Write-Host ""
 
     Clear-AndInitializeDisk -DiskNumber $DiskNumber
@@ -540,8 +528,9 @@ function Initialize-DiskLayout {
         New-RecoveryPartition -DiskNumber $DiskNumber
     }
 
-    Write-Ok "Partition layout complete. C: is ready for the OS image."
+    Write-Ok "Partition layout complete. W: is ready for the OS image."
 }
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
