@@ -73,10 +73,10 @@ function Write-Log {
 
     # Console coloring
     $color = switch ($Level) {
-        'STEP  ' {'Cyan'}
-        'OK   '   {'Green'}
-        'WARN  ' {'Yellow'}
-        'ERROR '{'Red'}
+        'STEP' {'Cyan'}
+        'OK'   {'Green'}
+        'WARN' {'Yellow'}
+        'ERROR'{'Red'}
         default{'Gray'}
     }
     Write-Host "[$Level] $Message" -ForegroundColor $color
@@ -822,7 +822,7 @@ Invoke-Step "17) Setup WinRE WIM on recovery partition + register offline" {
     }
 
     # Call reagentc.exe by full path in WinRE (avoid PATH issues)
-    $reagentc = Join-Path 'W:\Windows\System32\reagentc.exe'
+    $reagentc = 'W:\Windows\System32\reagentc.exe'
     if (-not (Test-Path -LiteralPath $reagentc)) {
         throw "reagentc.exe not found at expected path: $reagentc"
     }
