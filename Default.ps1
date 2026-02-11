@@ -716,7 +716,77 @@ function Find-DriverPackMatch {
         MatchInfo = $top.MatchedFields
     }
 }
+function Get-WindowsImageIndexByExactName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ImagePath,
+        [Parameter(Mandatory)][string]$ExactName
+    )
 
+    # Prefer DISM PowerShell cmdlets when available
+    if (Get-Command Get-WindowsImage -ErrorAction SilentlyContinue) {
+        $images = Get-WindowsImage -ImagePath $ImagePath
+        $hit = $images | Where-Object { $_.ImageName -eq $ExactName } | Select-Object -First 1
+        if (-not $hit) {
+            $names = ($images | Select-Object -ExpandProperty ImageName) -join '; '
+            throw "No image named '$ExactName' found in $ImagePath. Available: $names"
+        }
+        return [int]$hit.ImageIndex
+    }
+
+    # Fallback to DISM.exe enumeration
+    $out = & dism.exe /English /Get-WimInfo /WimFile:"$ImagePath" 2>&1 | Out-String
+
+    # Parse blocks like:
+    # Index : 6
+    # Name  : Windows 11 Enterprise
+    $matches = [regex]::Matches($out, "Index\s*:\s*(\d+)\s+Name\s*:\s*(.+?)\s*(?:\r?\n|$)",
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+    if ($matches.Count -eq 0) {
+        throw "Failed to parse DISM /Get-WimInfo output for $ImagePath"
+    }
+
+    $entries = foreach ($m in $matches) {
+        [pscustomobject]@{
+            Index = [int]$m.Groups[1].Value
+            Name  = $m.Groups[2].Value.Trim()
+        }
+    }
+
+    $hit = $entries | Where-Object { $_.Name -eq $ExactName } | Select-Object -First 1
+    if (-not $hit) {
+        $names = ($entries.Name | Sort-Object -Unique) -join '; '
+        throw "No image named '$ExactName' found in $ImagePath. Available: $names"
+    }
+
+    return [int]$hit.Index
+}
+
+function Apply-WindowsImageSmart {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ImagePath,
+        [Parameter(Mandatory)][string]$ApplyPath,
+        [Parameter(Mandatory)][string]$ExactName
+    )
+
+    $index = Get-WindowsImageIndexByExactName -ImagePath $ImagePath -ExactName $ExactName
+    Write-Ok "Selected image: '$ExactName' (Index $index)"
+
+    # Prefer Expand-WindowsImage if available (cleaner than DISM.exe)
+    if (Get-Command Expand-WindowsImage -ErrorAction SilentlyContinue) {
+        # Expand-WindowsImage can apply by Name directly [1](https://learn.microsoft.com/en-us/powershell/module/dism/expand-windowsimage?view=windowsserver2025-ps)
+        Expand-WindowsImage -ImagePath $ImagePath -ApplyPath $ApplyPath -Name $ExactName -CheckIntegrity
+        return
+    }
+
+    # Fallback to DISM.exe /Apply-Image (Index-based)
+    & dism.exe /Apply-Image /ImageFile:"$ImagePath" /Index:$index /ApplyDir:"$ApplyPath"
+    if ($LASTEXITCODE -ne 0) {
+        throw "DISM /Apply-Image failed with exit code $LASTEXITCODE"
+    }
+}
 
 function Invoke-BuildForge {
     [CmdletBinding(SupportsShouldProcess)]
@@ -880,19 +950,17 @@ try {
     Write-Ok "OS image verified (or no hashes provided)."
 
     Start-Step "Applying Operating System Image to W:\\"
-    if ($PSCmdlet.ShouldProcess("W:\\", "Apply Windows image from $osFileName (Index $osIndex)")) {
-        # DISM apply-image works for WIM/ESD
-        Invoke-Native -FilePath "dism.exe" -Arguments @(
-            "/Apply-Image",
-            "/ImageFile:$osPath",
-            "/Index:$osIndex",
-            "/ApplyDir:W:\"
-        ) | Out-Null
 
-        Write-Ok "Windows image applied to W:\"
-    } else {
-        Write-Warn "Skipped apply-image due to ShouldProcess."
-    }
+$desired = "Windows 11 Enterprise"
+
+if (Should-Do -Target "W:\" -Action "Apply '$desired' from $osFileName") {
+
+    Apply-WindowsImageSmart -ImagePath $osPath -ApplyPath "W:\" -ExactName $desired
+
+    Write-Ok "Windows image applied to W:\"
+} else {
+    Write-Warn "Skipped apply-image due to WhatIf/ShouldProcess."
+}
 
     Start-Step "Creating Boot Files (BCDBoot)"
     if ($PSCmdlet.ShouldProcess("S:\\", "Create UEFI boot files from W:\\Windows")) {
