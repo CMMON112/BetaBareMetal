@@ -524,6 +524,34 @@ function Get-ImageIndexesFromEsd {
     return $list
 }
 
+
+function Get-OffineWindowsOsGuid {
+    param(
+        [Parameter(Mandatory)]
+        [string] $BcdStorePath
+    )
+
+    $out = & bcdedit.exe /enum all /store $BcdStorePath 2>&1
+
+    $current = @{}
+    foreach ($line in $out) {
+        if ($line -match '^\s*identifier\s+(\{.+\})') {
+            $current.Identifier = $Matches[1]
+        }
+        elseif ($line -match '^\s*device\s+partition=(.+)') {
+            $current.Device = $Matches[1]
+        }
+        elseif ($line -match '^\s*path\s+\\windows\\system32\\winload\.efi') {
+            if ($current.Device -match 'W:') {
+                return $current.Identifier
+            }
+        }
+    }
+
+    throw "Unable to locate OS GUID for W:\Windows in BCD store"
+}
+
+
 function Select-DesiredIndex {
     [CmdletBinding()]
     param(
@@ -824,41 +852,44 @@ Invoke-Step "16) Configure boot (BCDBoot UEFI)" {
 }
 
 Invoke-Step "17) Setup WinRE WIM on recovery partition + register offline" {
+
     $reDir = 'R:\Recovery\WindowsRE'
     Ensure-Dir $reDir
 
     $src = 'W:\Windows\System32\Recovery\Winre.wim'
     $dst = Join-Path $reDir 'Winre.wim'
 
-    if (Test-Path -LiteralPath $src) {
-        Copy-Item -LiteralPath $src -Destination $dst -Force
-        Write-Log "Copied Winre.wim -> $dst" 'OK'
-    } else {
-        Write-Log "Winre.wim not found at $src (some images store it differently)." 'WARN'
+    if (-not (Test-Path -LiteralPath $src)) {
+        throw "Winre.wim not found at $src"
     }
 
-    # Call reagentc.exe by full path
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    Write-Log "Copied Winre.wim -> $dst" 'OK'
+
     $reagentc = 'W:\Windows\System32\reagentc.exe'
     if (-not (Test-Path -LiteralPath $reagentc)) {
-        throw "reagentc.exe not found at expected path: $reagentc"
+        throw "Offline reagentc.exe not found at $reagentc"
     }
 
-    # REAgentC offline: /setreimage /path <dir> /target <offline windows>
-    if ($PSCmdlet.ShouldProcess("W:\Windows", "Register and enable WinRE offline")) {
+    # 1) Register WinRE image location
+    Invoke-Native -FilePath $reagentc -Arguments @(
+        "/setreimage",
+        "/path", $reDir,
+        "/target", "W:\Windows"
+    ) | Out-Null
 
-        Invoke-Native -FilePath $reagentc -Arguments @(
-            "/setreimage",
-            "/path", $reDir,
-            "/target", "W:\Windows"
-        ) | Out-Null
+    # 2) Get OS GUID from offline BCD
+    $bcdStore = 'S:\EFI\Microsoft\Boot\BCD'
+    $osGuid = Get-OffineWindowsOsGuid -BcdStorePath $bcdStore
+    Write-Log "Detected OS GUID: $osGuid" 'INFO'
 
-        Invoke-Native -FilePath $reagentc -Arguments @(
-            "/enable",
-            "/target", "W:\Windows"
-        ) | Out-Null
+    # 3) Enable WinRE using OS GUID (REQUIRED in WinRE)
+    Invoke-Native -FilePath $reagentc -Arguments @(
+        "/enable",
+        "/osguid", $osGuid
+    ) | Out-Null
 
-        Write-Log "WinRE configured for offline Windows." 'OK'
-    }
+    Write-Log "WinRE configured and bound to OS loader $osGuid" 'OK'
 }
 
 Invoke-Step "18) Extract HP driver pack silently (wait for full process tree)" {
