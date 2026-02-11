@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ProductMappings>
+
+    <ProductMapping>
+        <CSManufacturer>HP</CSManufacturer>
+        <CSModel>HP Elite x360 1040 14 inch G10 2-in-1 Notebook PC</CSModel>
+        <BBManufacturer>HP</BBManufacturer>
+        <BBModel></BBModel>
+        <BBSKU></BBSKU>
+        <BBProduct>8B41</BBProduct>
+        <DriverURL>https://ftp.hp.com/pub/softpaq/sp160001-160500/sp160195.exe</DriverURL>
+    </ProductMapping>
+
+    <ProductMapping>
+        <CSManufacturer>Fabrikam</CSManufacturer>
+        <CSModel></CSModel> <!-- NULL -->
+        <BBManufacturer>BlueBox</BBManufacturer>
+        <BBModel></BBModel> <!-- NULL -->
+        <BBSKU>SKU-22222</BBSKU>
+        <BBProduct>Lite Gadget</BBProduct>
+        <DriverURL></DriverURL> <!-- NULL -->
+    </ProductMapping>
+
+</ProductMappings>
