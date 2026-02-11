@@ -551,6 +551,67 @@ function Get-OffineWindowsOsGuid {
     throw "Unable to locate OS GUID for W:\Windows in BCD store"
 }
 
+function Get-OfflineOsGuidFromBcd {
+    [CmdletBinding()]
+    param(
+        [string] $BcdStorePath = 'S:\EFI\Microsoft\Boot\BCD',
+        [string] $WindowsPartition = 'W:'
+    )
+
+    if (-not (Test-Path -LiteralPath $BcdStorePath)) {
+        throw "BCD store not found at '$BcdStorePath'. Is the EFI partition mounted as S:?"
+    }
+
+    $out = & bcdedit.exe /enum all /store $BcdStorePath 2>&1
+    if (-not $out) {
+        throw "bcdedit returned no output when reading '$BcdStorePath'"
+    }
+
+    # We want the Windows Boot Loader entry whose device is partition=W: and path is winload.efi
+    $currentId = $null
+    $currentDevice = $null
+    $isWinLoader = $false
+
+    foreach ($line in $out) {
+
+        if ($line -match '^\s*identifier\s+(\{.+\})\s*$') {
+            $currentId = $Matches[1]
+            $currentDevice = $null
+            $isWinLoader = $false
+            continue
+        }
+
+        if ($line -match '^\s*device\s+partition=(.+?)\s*$') {
+            $currentDevice = $Matches[1]
+            continue
+        }
+
+        if ($line -match '^\s*path\s+\\Windows\\System32\\winload\.efi\s*$') {
+            $isWinLoader = $true
+            continue
+        }
+
+        # When we hit a blank line, we've reached the end of a block — evaluate it.
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            if ($currentId -and $isWinLoader -and $currentDevice -and ($currentDevice -match "^$([regex]::Escape($WindowsPartition))$")) {
+                return $currentId
+            }
+
+            # reset for next block
+            $currentId = $null
+            $currentDevice = $null
+            $isWinLoader = $false
+        }
+    }
+
+    # Final block may not end with blank line
+    if ($currentId -and $isWinLoader -and $currentDevice -and ($currentDevice -match "^$([regex]::Escape($WindowsPartition))$")) {
+        return $currentId
+    }
+
+    throw "Could not locate an OS loader GUID in BCD store '$BcdStorePath' for device partition=$WindowsPartition (winload.efi)."
+}
+
 
 function Select-DesiredIndex {
     [CmdletBinding()]
@@ -859,37 +920,40 @@ Invoke-Step "17) Setup WinRE WIM on recovery partition + register offline" {
     $src = 'W:\Windows\System32\Recovery\Winre.wim'
     $dst = Join-Path $reDir 'Winre.wim'
 
-    if (-not (Test-Path -LiteralPath $src)) {
-        throw "Winre.wim not found at $src"
+    if (Test-Path -LiteralPath $src) {
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        Write-Log "Copied Winre.wim -> $dst" 'OK'
+    } else {
+        throw "Winre.wim not found at $src (some images store it differently)."
     }
 
-    Copy-Item -LiteralPath $src -Destination $dst -Force
-    Write-Log "Copied Winre.wim -> $dst" 'OK'
-
+    # Use reagentc.exe from the OFFLINE OS (WinRE often doesn't include reagentc.exe)
     $reagentc = 'W:\Windows\System32\reagentc.exe'
     if (-not (Test-Path -LiteralPath $reagentc)) {
-        throw "Offline reagentc.exe not found at $reagentc"
+        throw "reagentc.exe not found at expected path: $reagentc"
     }
 
-    # 1) Register WinRE image location
-    Invoke-Native -FilePath $reagentc -Arguments @(
-        "/setreimage",
-        "/path", $reDir,
-        "/target", "W:\Windows"
-    ) | Out-Null
+    if ($PSCmdlet.ShouldProcess("W:\Windows", "Register and enable WinRE offline")) {
 
-    # 2) Get OS GUID from offline BCD
-    $bcdStore = 'S:\EFI\Microsoft\Boot\BCD'
-    $osGuid = Get-OffineWindowsOsGuid -BcdStorePath $bcdStore
-    Write-Log "Detected OS GUID: $osGuid" 'INFO'
+        # 1) Point offline Windows at the WinRE image location
+        Invoke-Native -FilePath $reagentc -Arguments @(
+            "/setreimage",
+            "/path", $reDir,
+            "/target", "W:\Windows"
+        ) | Out-Null
 
-    # 3) Enable WinRE using OS GUID (REQUIRED in WinRE)
-    Invoke-Native -FilePath $reagentc -Arguments @(
-        "/enable",
-        "/osguid", $osGuid
-    ) | Out-Null
+        # 2) WinRE/WinPE: enabling requires the OS loader GUID (/osguid) [1](https://www.delftstack.com/howto/powershell/wait-for-each-command-to-finish-in-powershell/)
+        $osGuid = Get-OfflineOsGuidFromBcd -BcdStorePath 'S:\EFI\Microsoft\Boot\BCD' -WindowsPartition 'W:'
+        Write-Log "Resolved OS loader GUID for WinRE binding: $osGuid" 'INFO'
 
-    Write-Log "WinRE configured and bound to OS loader $osGuid" 'OK'
+        # 3) Enable WinRE bound to that OS GUID (do NOT use [default])
+        Invoke-Native -FilePath $reagentc -Arguments @(
+            "/enable",
+            "/osguid", $osGuid
+        ) | Out-Null
+
+        Write-Log "WinRE configured and enabled (osguid=$osGuid)." 'OK'
+    }
 }
 
 Invoke-Step "18) Extract HP driver pack silently (wait for full process tree)" {
