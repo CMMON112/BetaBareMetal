@@ -734,4 +734,4 @@ else {
     Write-Output $result.Reason
     $result.Candidates | Format-Table -AutoSize
 }
-$result | Format-List * | out-string | foreach-object {write-info $_.TrimEnd()}] | Format-List *
+$result | Format-List * | out-string | foreach-object {write-info $_.TrimEnd()}
