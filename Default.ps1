@@ -731,4 +731,4 @@ else {
     $result.Candidates | Format-Table -AutoSize
 }
 
-Write-host "$hardware"
+Write-host "$hw"
