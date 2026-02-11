@@ -676,7 +676,7 @@ try {
     Write-Info "TempRoot: $script:TempRoot"
 
     Start-Step "Download and resolve OS catalog entry"
-    $catalog = Get-OSDCatalog -CatalogUrl $OSCatalogUrl
+    $catalog = Get-Catalog -CatalogUrl $OSCatalogUrl
 
     $osEntry = Resolve-OsCatalogEntry -Catalog $catalog `
         -OperatingSystem $OperatingSystem `
