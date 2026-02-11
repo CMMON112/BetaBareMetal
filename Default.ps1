@@ -391,7 +391,36 @@ function Get-Catalog {
         throw "Get-Catalog: Failed to Import-Clixml '$localPath'. If this file is real XML (not CLIXML), the parser must be changed."
     }
 }
+function Get-HardwareIdentity {
+    [CmdletBinding()]
+    param()
 
+    $bb = $null
+    $cs = $null
+
+    try { $bb = Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction SilentlyContinue } catch {}
+    try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue } catch {}
+
+    # Normalize SKU – some systems populate different fields
+    $bbSku = $null
+    if ($bb) {
+        if (-not [string]::IsNullOrWhiteSpace($bb.SKU)) {
+            $bbSku = $bb.SKU
+        } elseif (-not [string]::IsNullOrWhiteSpace($bb.SKUNumber)) {
+            $bbSku = $bb.SKUNumber
+        }
+    }
+
+    [pscustomobject]@{
+        CSManufacturer = if ($cs) { $cs.Manufacturer } else { $null }
+        CSModel        = if ($cs) { $cs.Model } else { $null }
+
+        BBManufacturer = if ($bb) { $bb.Manufacturer } else { $null }
+        BBModel        = if ($bb) { $bb.Model } else { $null }
+        BBSKU          = $bbSku
+        BBProduct      = if ($bb) { $bb.Product } else { $null }
+    }
+}
 function Resolve-OsCatalogEntry {
     [CmdletBinding()]
     param(
