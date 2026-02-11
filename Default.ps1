@@ -789,7 +789,25 @@ Invoke-Step "15) Expand selected index to W:\" {
     }
 }
 
-Invoke-Step "16) Setup WinRE WIM on recovery partition + register offline" {
+Invoke-Step "16) Configure boot (BCDBoot UEFI)" {
+    # BCDBoot sets up boot files for an applied image
+    if ($PSCmdlet.ShouldProcess("S:\", "BCDBoot UEFI from W:\Windows")) {
+
+        # Prefer full path (WinRE PATH can be odd)
+        $bcdboot = Join-Path $env:WINDIR 'System32\bcdboot.exe'
+        if (-not (Test-Path -LiteralPath $bcdboot)) { $bcdboot = "bcdboot.exe" }
+
+        Invoke-Native -FilePath $bcdboot -Arguments @(
+            "W:\Windows",
+            "/s","S:",
+            "/f","UEFI"
+        ) | Out-Null
+
+        Write-Log "Boot files created (UEFI)." 'OK'
+    }
+}
+
+Invoke-Step "17) Setup WinRE WIM on recovery partition + register offline" {
     $reDir = 'R:\Recovery\WindowsRE'
     Ensure-Dir $reDir
 
@@ -803,32 +821,27 @@ Invoke-Step "16) Setup WinRE WIM on recovery partition + register offline" {
         Write-Log "Winre.wim not found at $src (some images store it differently)." 'WARN'
     }
 
-    # REAgentC offline: /setreimage /path <dir> /target <offline windows> [2](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/reagentc-command-line-options?view=windows-11)
+    # Call reagentc.exe by full path in WinRE (avoid PATH issues)
+    $reagentc = Join-Path $env:WINDIR 'System32\reagentc.exe'
+    if (-not (Test-Path -LiteralPath $reagentc)) {
+        throw "reagentc.exe not found at expected path: $reagentc"
+    }
+
+    # REAgentC offline: /setreimage /path <dir> /target <offline windows>
     if ($PSCmdlet.ShouldProcess("W:\Windows", "Register and enable WinRE offline")) {
-        Invoke-Native -FilePath "reagentc.exe" -Arguments @(
+
+        Invoke-Native -FilePath $reagentc -Arguments @(
             "/setreimage",
             "/path", $reDir,
             "/target", "W:\Windows"
         ) | Out-Null
 
-        Invoke-Native -FilePath "reagentc.exe" -Arguments @(
+        Invoke-Native -FilePath $reagentc -Arguments @(
             "/enable",
             "/target", "W:\Windows"
         ) | Out-Null
 
         Write-Log "WinRE configured for offline Windows." 'OK'
-    }
-}
-
-Invoke-Step "17) Configure boot (BCDBoot UEFI)" {
-    # BCDBoot sets up boot files for an applied image [3](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/bcdboot-command-line-options-techref-di?view=windows-11)
-    if ($PSCmdlet.ShouldProcess("S:\", "BCDBoot UEFI from W:\Windows")) {
-        Invoke-Native -FilePath "bcdboot.exe" -Arguments @(
-            "W:\Windows",
-            "/s","S:",
-            "/f","UEFI"
-        ) | Out-Null
-        Write-Log "Boot files created (UEFI)." 'OK'
     }
 }
 
