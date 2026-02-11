@@ -66,6 +66,11 @@ function Write-Log {
         [Parameter(Mandatory)][string]$Message,
         [ValidateSet('INFO','WARN','ERROR','OK','STEP')][string]$Level='INFO'
     )
+
+    
+    # --- Fix: tolerate empty/whitespace log lines (common from native tools) ---
+    if ([string]::IsNullOrWhiteSpace($Message)) { return }
+
     Initialize-Logging
 
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -821,7 +826,7 @@ Invoke-Step "17) Setup WinRE WIM on recovery partition + register offline" {
         Write-Log "Winre.wim not found at $src (some images store it differently)." 'WARN'
     }
 
-    # Call reagentc.exe by full path in WinRE (avoid PATH issues)
+    # Call reagentc.exe by full path
     $reagentc = 'W:\Windows\System32\reagentc.exe'
     if (-not (Test-Path -LiteralPath $reagentc)) {
         throw "reagentc.exe not found at expected path: $reagentc"
