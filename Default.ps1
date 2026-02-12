@@ -1069,23 +1069,41 @@ Invoke-Step "10" "Move BuildForge root to W: (when W: exists)" {
 }
 
 Invoke-Step "11" "Download correct OS ESD/WIM (best match)" {
+
+    # Re-evaluate BuildForgeRoot after any disk / partition changes
     Update-BuildForgeRoot
+
+    # Explicitly ensure OS download directory exists
     $osDir = Join-Path $script:BuildForgeRoot 'OS'
     Ensure-Dir $osDir
 
+    Write-Log ("OS download directory prepared: {0}" -f $osDir) 'INFO'
+
+    # Resolve file name from catalog URL
     $osFile = Get-LeafNameFromUrl -Url $script:OsUrl -Fallback 'install.esd'
     $osPath = Join-Path $osDir $osFile
 
+    Write-Log ("Preparing to download OS image: {0}" -f $osFile) 'INFO'
+    Write-Detail ("OS image URL: {0}" -f $script:OsUrl) 'INFO'
+    Write-Detail ("Destination path: {0}" -f $osPath) 'INFO'
+
+    # Perform download (Invoke-Download now defensively recreates parent dirs)
     Invoke-Download -Url $script:OsUrl -DestPath $osPath | Out-Null
 
+    # Optional integrity verification
     if ($script:OsSha1 -or $script:OsSha256) {
-        Confirm-FileHash -FilePath $osPath -ExpectedSha1 $script:OsSha1 -ExpectedSha256 $script:OsSha256
-    } else {
-        Write-Log "No hashes provided by catalog. Integrity check skipped." 'WARN'
+        Confirm-FileHash -FilePath $osPath `
+                         -ExpectedSha1   $script:OsSha1 `
+                         -ExpectedSha256 $script:OsSha256
+    }
+    else {
+        Write-Log "No hashes provided by catalog. Integrity verification skipped." 'WARN'
     }
 
+    # Persist resolved OS path
     $script:OsPath = $osPath
-    Write-Log ("OS image ready: {0}" -f $osFile) 'OK'
+
+    Write-Log ("OS image ready for deployment: {0}" -f $osFile) 'OK'
 }
 
 Invoke-Step "12" "Download best-match driver pack (if matched)" {
