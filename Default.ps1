@@ -1005,8 +1005,25 @@ Invoke-Step "4" "List target OS parameters" {
 }
 
 Invoke-Step "5" "Download catalogs" {
-    $script:OSCatalog     = Get-Catalog -CatalogUrl $OSCatalogUrl
+
+    # Re-evaluate BuildForgeRoot in case disks or roots changed
+    Update-BuildForgeRoot
+
+    # Explicitly ensure catalog directory exists
+    $catalogDir = Join-Path $script:BuildForgeRoot 'Catalogs'
+    Ensure-Dir $catalogDir
+
+    Write-Log ("Catalog directory prepared: {0}" -f $catalogDir) 'INFO'
+
+    # Download OS catalog
+    Write-Log "Downloading OS catalog" 'INFO'
+    $script:OSCatalog = Get-Catalog -CatalogUrl $OSCatalogUrl
+
+    # Download driver catalog
+    Write-Log "Downloading driver pack catalog" 'INFO'
     $script:DriverCatalog = Get-Catalog -CatalogUrl $DriverCatalogUrl
+
+    Write-Log "Catalogs downloaded and loaded successfully" 'OK'
 }
 
 Invoke-Step "6" "Match OS entry from catalog" {
