@@ -39,12 +39,22 @@ param(
     [switch] $ForceRedownload,
     [switch] $ForceApplyImage,
     
-    [ValidatePattern('^\d+(\.\d+)?$')]
-    [string] $FromStep = '',
+    # Step targeting (optional; safe default when called with no args)
+    [AllowNull()]
+    [AllowEmptyString()]
+    [ValidateScript({
+        if ([string]::IsNullOrWhiteSpace($_)) { return $true }
+        return ($_ -match '^\d+(\.\d+)?$')
+    })]
+    [string] $FromStep = $null,
 
-    [ValidatePattern('^\d+(\.\d+)?$')]
-    [string] $OnlyStep = ''
-
+    [AllowNull()]
+    [AllowEmptyString()]
+    [ValidateScript({
+        if ([string]::IsNullOrWhiteSpace($_)) { return $true }
+        return ($_ -match '^\d+(\.\d+)?$')
+    })]
+    [string] $OnlyStep = $null
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,7 +73,7 @@ $script:OsSha1                = $null
 $script:OsSha256              = $null
 $script:OsPath                = $null
 $script:DriverMatch           = $null
-$script:DriverPackPath        = $null
+$script:DriverPackPath         = $null
 $script:DriverExtractDir      = $null
 $script:TargetDisk            = $null
 $script:ImageIndexes          = $null
