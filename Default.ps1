@@ -910,23 +910,33 @@ function Import-HPClientDriverPackCatalog {
 
     $results = New-Object System.Collections.Generic.List[object]
 
-    foreach ($sp in $softPaqs) {
-        $id = [string]$sp.Id
-        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+ foreach ($sp in $softPaqs) {
+    $id = [string]$sp.Id
+    if ([string]::IsNullOrWhiteSpace($id)) { continue }
 
-        $matches = $mapRows | Where-Object { $_.SoftPaqId -match $id }
-        if (-not $matches) { continue }
+    $matches = $mapRows | Where-Object { $_.SoftPaqId -match $id }
+    if (-not $matches) { continue }
 
-        $results.Add([pscustomobject]@{
-            SoftPaqId    = [string]$sp.Id
-            Name         = [string]$sp.Name
-            Version      = [string]$sp.Version
-            DateReleased = (try { [datetime]$sp.DateReleased } catch { $null })
-            Url          = [string]$sp.Url
-            SystemIds    = @($matches | Select-Object -ExpandProperty SystemId -Unique)
-            OSNames      = @($matches | Select-Object -ExpandProperty OSName   -Unique)
-        }) | Out-Null
+    # PS 5.1-safe try/catch (statement), then assign variable
+    $dateReleased = $null
+    try {
+        if (-not [string]::IsNullOrWhiteSpace([string]$sp.DateReleased)) {
+            $dateReleased = [datetime]$sp.DateReleased
+        }
+    } catch {
+        $dateReleased = $null
     }
+
+    $results.Add([pscustomobject]@{
+        SoftPaqId    = [string]$sp.Id
+        Name         = [string]$sp.Name
+        Version      = [string]$sp.Version
+        DateReleased = $dateReleased
+        Url          = [string]$sp.Url
+        SystemIds    = @($matches | Select-Object -ExpandProperty SystemId -Unique)
+        OSNames      = @($matches | Select-Object -ExpandProperty OSName   -Unique)
+    }) | Out-Null
+}
 
     return $results
 }
