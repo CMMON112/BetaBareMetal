@@ -1096,62 +1096,53 @@ Invoke-Step "18) Extract HP driver pack silently (wait for full process tree)" {
         return
     }
 
+    # Ensure BuildForgeRoot is correct (may relocate X: -> W:\BuildForge -> W:\Windows\Temp\BuildForge)
     Update-BuildForgeRoot
 
+    # Extraction destination (stable)
     $extractDir = Join-Path $script:BuildForgeRoot 'ExtractedDrivers'
     Ensure-Dir $extractDir
 
+    # Resolve driver pack path (in case BuildForgeRoot moved after download)
     $script:DriverPackPath = Resolve-ArtifactPath -Path $script:DriverPackPath
 
     $ext = [IO.Path]::GetExtension($script:DriverPackPath).ToLowerInvariant()
-    if ($ext -ne '.exe' -and $ext -ne '.zip' -and $ext -ne '.cab') {
-        throw "Unknown driver pack extension '$ext' - cannot extract."
+    Write-Log "Driver pack: $($script:DriverPackPath) (ext=$ext)" 'INFO'
+    Write-Log "Extraction dir: $extractDir" 'INFO'
+
+    switch ($ext) {
+        '.exe' {
+            # HP SoftPaq extraction (your Expand-HPSoftPaq should try /s /e /f first)
+            Expand-HPSoftPaq -SoftPaqExe $script:DriverPackPath -Destination $extractDir
+        }
+        '.zip' {
+            Expand-Archive -LiteralPath $script:DriverPackPath -DestinationPath $extractDir -Force
+            Write-Log "Extracted ZIP -> $extractDir" 'OK'
+        }
+        '.cab' {
+            Invoke-Native -FilePath "expand.exe" -Arguments @("-F:*", $script:DriverPackPath, $extractDir) | Out-Null
+            Write-Log "Extracted CAB -> $extractDir" 'OK'
+        }
+        default {
+            throw "Unknown driver pack extension '$ext' - cannot extract."
+        }
     }
 
-    if ($ext -eq '.exe') {
-        Expand-HPSoftPaq -SoftPaqExe $script:DriverPackPath -Destination $extractDir
-    }
-    elseif ($ext -eq '.zip') {
-        Expand-Archive -LiteralPath $script:DriverPackPath -DestinationPath $extractDir -Force
-        Write-Log "Extracted ZIP -> $extractDir" 'OK'
-    }
-    elseif ($ext -eq '.cab') {
-        Invoke-Native -FilePath "expand.exe" -Arguments @("-F:*", $script:DriverPackPath, $extractDir) | Out-Null
-        Write-Log "Extracted CAB -> $extractDir" 'OK'
+    # Count INFs under extraction root
+    $infCount = (Get-ChildItem -LiteralPath $extractDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
+    Write-Log "Total INF files under extraction root: $infCount" 'INFO'
+
+    if ($infCount -eq 0) {
+        throw "Extraction completed but produced 0 .INF files under '$extractDir'. Cannot inject drivers."
     }
 
-    # Search for INF files in likely locations
-    $candidates = @(
-        $extractDir,
-        'C:\SWSetup',
-        'W:\SWSetup',
-        'W:\Windows\Temp',
-        'X:\Windows\Temp'
-    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
-
-    $infHits = foreach ($c in $candidates) {
-        Get-ChildItem -LiteralPath $c -Recurse -Filter *.inf -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty DirectoryName -Unique |
-            ForEach-Object { [pscustomobject]@{ Root=$c; InfDir=$_ } }
-    }
-
-    if (-not $infHits) {
-        Write-Log "No .INF files found under candidates: $($candidates -join ', ')" 'ERROR'
-        throw "SoftPaq extraction produced no driver INFs. Cannot proceed with injection."
-    }
-
-    # Choose the folder with the most INFs beneath it (best injection root)
-    $grouped = $infHits | Group-Object InfDir | ForEach-Object {
-        [pscustomobject]@{ Path=$_.Name; Count=$_.Count }
-    } | Sort-Object Count -Descending
-
-    $bestInfDir = $grouped[0].Path
-    Write-Log "Selected driver root for injection (best INF dir): $bestInfDir (INF hits: $($grouped[0].Count))" 'OK'
-
-    $script:DriverExtractDir = $bestInfDir
+    # IMPORTANT: inject from the extraction root (not a deep leaf)
+    $script:DriverExtractDir = $extractDir
+    Write-Log "DriverExtractDir set for injection: $script:DriverExtractDir" 'OK'
 }
 
 Invoke-Step "19) Inject drivers into offline image (Add-WindowsDriver /Recurse)" {
+
     if (-not $script:DriverExtractDir) {
         Write-Log "No extracted drivers directory; skipping injection." 'WARN'
         return
@@ -1161,21 +1152,20 @@ Invoke-Step "19) Inject drivers into offline image (Add-WindowsDriver /Recurse)"
         throw "DriverExtractDir does not exist: $($script:DriverExtractDir)"
     }
 
-    # Hard guard: ensure INF files exist before attempting injection
     $infCount = (Get-ChildItem -LiteralPath $script:DriverExtractDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
     Write-Log "INF files available for injection: $infCount (root=$($script:DriverExtractDir))" 'INFO'
-
     if ($infCount -eq 0) {
-        throw "No .INF files found under '$($script:DriverExtractDir)'. Add-WindowsDriver requires .inf driver packages. (Fix extraction/selection first.)"
+        throw "No .INF files found under '$($script:DriverExtractDir)'. Cannot inject drivers."
     }
 
     if ($PSCmdlet.ShouldProcess("W:\", "Add-WindowsDriver -Recurse from $($script:DriverExtractDir)")) {
 
-        # PowerShell cmdlet equivalent to DISM /Add-Driver /Recurse for offline images [1](https://www.tenforums.com/general-support/162980-what-index-number-how-do-i-find-thank-you.html)
+        # Add-WindowsDriver adds drivers to an offline image; -Recurse walks subfolders [1](https://learn.microsoft.com/en-us/powershell/module/dism/add-windowsdriver?view=windowsserver2025-ps)
         Add-WindowsDriver -Path 'W:\' `
                           -Driver $script:DriverExtractDir `
                           -Recurse `
                           -ErrorAction Stop | Out-Null
+                          # -ForceUnsigned  # uncomment only if you intentionally allow unsigned drivers
 
         Write-Log "Driver injection complete (Add-WindowsDriver)." 'OK'
     }
