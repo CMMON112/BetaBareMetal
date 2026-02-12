@@ -63,17 +63,15 @@ param(
 # - StrictMode 2.0 throws on uninitialized variables, so predeclare everything we might read.
 # ---------------------------
 
+# =====================================================================
+# BuildForge StrictMode + ScriptBlock SAFE VARIABLE BOOTSTRAP
+# =====================================================================
+
 function Ensure-LocalVar {
     param(
-        [Parameter(Mandatory=$true)]
-        [string] $Name,
-
-        [Parameter()]
-        [AllowNull()]
-        $DefaultValue = $null
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter()][AllowNull()]$DefaultValue = $null
     )
-
-    # Local scope is deterministic for scriptblock execution
     if (-not (Get-Variable -Name $Name -Scope Local -ErrorAction SilentlyContinue)) {
         Set-Variable -Name $Name -Scope Local -Value $DefaultValue -Force
     }
@@ -81,63 +79,82 @@ function Ensure-LocalVar {
 
 function Ensure-ScriptVar {
     param(
-        [Parameter(Mandatory=$true)]
-        [string] $Name,
-
-        [Parameter()]
-        [AllowNull()]
-        $DefaultValue = $null
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter()][AllowNull()]$DefaultValue = $null
     )
-
     if (-not (Get-Variable -Name $Name -Scope Script -ErrorAction SilentlyContinue)) {
         Set-Variable -Name $Name -Scope Script -Value $DefaultValue -Force
     }
 }
 
-# ---- "Parameter-like" variables (safe defaults when called with NO args) ----
-Ensure-LocalVar -Name 'Resume'                    -DefaultValue $false
-Ensure-LocalVar -Name 'FromStep'                  -DefaultValue $null
-Ensure-LocalVar -Name 'OnlyStep'                  -DefaultValue $null
-Ensure-LocalVar -Name 'ForceRepartition'          -DefaultValue $true
-Ensure-LocalVar -Name 'ForceRedownload'           -DefaultValue $false
-Ensure-LocalVar -Name 'ForceApplyImage'           -DefaultValue $false
-Ensure-LocalVar -Name 'TargetDiskNumber'          -DefaultValue -1
-Ensure-LocalVar -Name 'OperatingSystem'           -DefaultValue 'Windows 11'
-Ensure-LocalVar -Name 'ReleaseId'                 -DefaultValue '25H2'
-Ensure-LocalVar -Name 'Architecture'              -DefaultValue 'amd64'
-Ensure-LocalVar -Name 'LanguageCode'              -DefaultValue 'en-us'
-Ensure-LocalVar -Name 'License'                   -DefaultValue 'Volume'
-Ensure-LocalVar -Name 'SKU'                       -DefaultValue 'Enterprise'
-Ensure-LocalVar -Name 'DriverCatalogUrl'          -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml"
-Ensure-LocalVar -Name 'OSCatalogUrl'              -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
-Ensure-LocalVar -Name 'HpDriverPackCatalogCabUrl' -DefaultValue "https://ftp.hp.com/pub/caps-softpaq/cmit/HPClientDriverPackCatalog.cab"
+# ---------------------------------------------------------------------
+# Execution / control flags
+# ---------------------------------------------------------------------
+Ensure-LocalVar -Name 'Resume'           -DefaultValue $false
+Ensure-LocalVar -Name 'FromStep'         -DefaultValue $null
+Ensure-LocalVar -Name 'OnlyStep'         -DefaultValue $null
 
-# ---- Script-scope variables referenced by banners/logging BEFORE Step 1 ----
-# These MUST exist under StrictMode 2.0 or the first read will terminate. [1](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/set-strictmode?view=powershell-7.5)
-Ensure-ScriptVar -Name 'BuildForgeRoot'           -DefaultValue $null
-Ensure-ScriptVar -Name 'BuildForgeRootHistory'     -DefaultValue (New-Object System.Collections.Generic.List[string])
+Ensure-LocalVar -Name 'ForceRepartition' -DefaultValue $true
+Ensure-LocalVar -Name 'ForceRedownload'  -DefaultValue $false
+Ensure-LocalVar -Name 'ForceApplyImage'  -DefaultValue $false
+Ensure-LocalVar -Name 'TargetDiskNumber' -DefaultValue -1
 
-Ensure-ScriptVar -Name 'Hardware'            -DefaultValue $null
-Ensure-ScriptVar -Name 'OSCatalog'           -DefaultValue $null
-Ensure-ScriptVar -Name 'DriverCatalog'       -DefaultValue $null
-Ensure-ScriptVar -Name 'OsEntry'             -DefaultValue $null
-Ensure-ScriptVar -Name 'OsUrl'               -DefaultValue $null
-Ensure-ScriptVar -Name 'OsSha1'              -DefaultValue $null
-Ensure-ScriptVar -Name 'OsSha256'            -DefaultValue $null
-Ensure-ScriptVar -Name 'OsPath'              -DefaultValue $null
-Ensure-ScriptVar -Name 'DriverMatch'         -DefaultValue $null
-Ensure-ScriptVar -Name 'DriverPackPath'      -DefaultValue $null
-Ensure-ScriptVar -Name 'DriverExtractDir'    -DefaultValue $null
+# ---------------------------------------------------------------------
+# OS identity (Windows 11 24H2+ ONLY)
+# ---------------------------------------------------------------------
+Ensure-LocalVar -Name 'OperatingSystem' -DefaultValue 'Windows 11'
+Ensure-LocalVar -Name 'ReleaseId'       -DefaultValue '25H2'
+Ensure-LocalVar -Name 'Architecture'    -DefaultValue 'amd64'
+Ensure-LocalVar -Name 'LanguageCode'    -DefaultValue 'en-us'
+Ensure-LocalVar -Name 'License'         -DefaultValue 'Volume'
+Ensure-LocalVar -Name 'SKU'             -DefaultValue 'Enterprise'
+
+# ---------------------------------------------------------------------
+# Catalog URLs (always non-empty)
+# ---------------------------------------------------------------------
+Ensure-LocalVar -Name 'OSCatalogUrl' `
+    -DefaultValue 'https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml'
+
+Ensure-LocalVar -Name 'DriverCatalogUrl' `
+    -DefaultValue 'https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml'
+
+# HP REAL driver pack catalog (OSDCloud / OSD uses this)
+Ensure-LocalVar -Name 'HpDriverPackCatalogCabUrl' `
+    -DefaultValue 'https://ftp.hp.com/pub/caps-softpaq/cmit/HPClientDriverPackCatalog.cab'
+
+# ---------------------------------------------------------------------
+# Script-scope state (used by banners, logging, steps)
+# ---------------------------------------------------------------------
+Ensure-ScriptVar -Name 'BuildForgeRoot' -DefaultValue $null
+Ensure-ScriptVar -Name 'LogRoot'        -DefaultValue 'X:\Windows\Temp\BuildForge'
+Ensure-ScriptVar -Name 'LogFile'        -DefaultValue (Join-Path 'X:\Windows\Temp\BuildForge' 'BuildForge.log')
+
+Ensure-ScriptVar -Name 'CurrentStepNumber' -DefaultValue ''
+Ensure-ScriptVar -Name 'CurrentStepName'   -DefaultValue ''
+
+# ---------------------------------------------------------------------
+# Hardware identity (populated later)
+# ---------------------------------------------------------------------
+Ensure-ScriptVar -Name 'Hardware' -DefaultValue $null
+
+# ---------------------------------------------------------------------
+# Driver selection & processing state
+# ---------------------------------------------------------------------
+Ensure-ScriptVar -Name 'DriverMatch'        -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverExtractDir'   -DefaultValue $null
 Ensure-ScriptVar -Name 'TargetDisk'          -DefaultValue $null
-Ensure-ScriptVar -Name 'ImageIndexes'        -DefaultValue $null
-Ensure-ScriptVar -Name 'SelectedIndex'       -DefaultValue $null
-Ensure-ScriptVar -Name 'CurrentStepNumber'   -DefaultValue ''
-Ensure-ScriptVar -Name 'CurrentStepName'     -DefaultValue ''
-Ensure-Var -Name 'HpDriverPackCatalogCabUrl' -DefaultValue 'https://ftp.hp.com/pub/caps-softpaq/cmit/HPClientDriverPackCatalog.cab'
 
-# Fixed log paths (these are used very early)
-Ensure-ScriptVar -Name 'LogRoot' -DefaultValue 'X:\Windows\Temp\BuildForge'
-Ensure-ScriptVar -Name 'LogFile' -DefaultValue (Join-Path $script:LogRoot 'BuildForge.log')
+# ---------------------------------------------------------------------
+# WinRE / imaging state
+# ---------------------------------------------------------------------
+Ensure-ScriptVar -Name 'WinreWimPath' `
+    -DefaultValue 'R:\Recovery\WindowsRE\Winre.wim'
+
+Ensure-ScriptVar -Name 'MountedWindowsPath' -DefaultValue 'W:\'
+
+# =====================================================================
+# END BOOTSTRAP
+# =====================================================================
 
 
 # ---------------------------
@@ -1895,7 +1912,7 @@ Invoke-Step "22" "Cleanup temporary files and restart computer" {
     Write-Log "Persistent log confirmed at Windows volume." 'OK'
     Write-Log "Beginning final cleanup and system restart." 'INFO'
 
-    #Cleanup-And-Restart
+    Cleanup-And-Restart
 
     # No further output expected after this point
 }
