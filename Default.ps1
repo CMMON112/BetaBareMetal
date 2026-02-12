@@ -60,18 +60,17 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
-$ErrorActionPreference = 'Stop'
-Set-StrictMode -Version 2.0
-
 # Bootstrap param variables for Invoke-Expression execution
 function Ensure-Var {
     param(
         [Parameter(Mandatory=$true)]
         [string]$Name,
+
         [Parameter()]
         [AllowNull()]
-        $DefaultValue
+        $DefaultValue = $null
     )
+
     if (-not (Get-Variable -Name $Name -Scope 0 -ErrorAction SilentlyContinue)) {
         Set-Variable -Name $Name -Scope 0 -Value $DefaultValue -Force
     }
