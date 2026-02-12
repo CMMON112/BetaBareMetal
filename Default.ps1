@@ -1206,9 +1206,27 @@ function Inject-DriversIntoWinREWim {
         [Parameter(Mandatory)][string]$DriverRoot
     )
 
-    if (-not (Test-Path -LiteralPath $WinreWimPath)) { throw "WinRE WIM not found: $WinreWimPath" }
+    if (-not (Test-Path -LiteralPath $WinreWimPath)) {
+        throw "WinRE WIM not found: $WinreWimPath"
+    }
+    if (-not (Test-Path -LiteralPath $DriverRoot)) {
+        throw "Driver root not found: $DriverRoot"
+    }
 
-    Ensure-DismModule
+    # You said we can assume Add-WindowsDriver is present.
+    # Still, Mount/Dismount cmdlets must exist; if not, fail with a clear message.
+    if (-not (Get-Command -Name Mount-WindowsImage -ErrorAction SilentlyContinue)) {
+        try { Import-Module Dism -ErrorAction Stop } catch { }
+    }
+    if (-not (Get-Command -Name Mount-WindowsImage -ErrorAction SilentlyContinue)) {
+        throw "Mount-WindowsImage cmdlet not available. Dism PowerShell module missing in this WinRE."
+    }
+    if (-not (Get-Command -Name Dismount-WindowsImage -ErrorAction SilentlyContinue)) {
+        throw "Dismount-WindowsImage cmdlet not available. Dism PowerShell module missing in this WinRE."
+    }
+    if (-not (Get-Command -Name Add-WindowsDriver -ErrorAction SilentlyContinue)) {
+        throw "Add-WindowsDriver cmdlet not available. Cannot inject drivers."
+    }
 
     $mountDir = Join-Path $script:BuildForgeRoot ("MountWinRE_{0}" -f ([Guid]::NewGuid().ToString('N')))
     Ensure-Dir $mountDir
@@ -1217,7 +1235,7 @@ function Inject-DriversIntoWinREWim {
         Write-Log ("Mounting WinRE WIM: {0}" -f $WinreWimPath) 'INFO'
         Mount-WindowsImage -ImagePath $WinreWimPath -Index 1 -Path $mountDir -ErrorAction Stop | Out-Null
 
-        Write-Log "Injecting drivers into WinRE image..." 'INFO'
+        Write-Log ("Injecting drivers into WinRE image from: {0}" -f $DriverRoot) 'INFO'
         Add-WindowsDriver -Path $mountDir -Driver $DriverRoot -Recurse -ErrorAction Stop | Out-Null
 
         Write-Log "Committing WinRE changes..." 'INFO'
@@ -1227,7 +1245,7 @@ function Inject-DriversIntoWinREWim {
     }
     catch {
         # attempt discard if mounted
-        try { Dismount-WindowsImage -Path $mountDir -Discard -ErrorAction SilentlyContinue | Out-Null } catch {}
+        try { Dismount-WindowsImage -Path $mountDir -Discard -ErrorAction SilentlyContinue | Out-Null } catch { }
         throw
     }
     finally {
