@@ -102,7 +102,6 @@ Ensure-LocalVar -Name 'ForceRepartition'          -DefaultValue $true
 Ensure-LocalVar -Name 'ForceRedownload'           -DefaultValue $false
 Ensure-LocalVar -Name 'ForceApplyImage'           -DefaultValue $false
 Ensure-LocalVar -Name 'TargetDiskNumber'          -DefaultValue -1
-
 Ensure-LocalVar -Name 'OperatingSystem'           -DefaultValue 'Windows 11'
 Ensure-LocalVar -Name 'ReleaseId'                 -DefaultValue '25H2'
 Ensure-LocalVar -Name 'Architecture'              -DefaultValue 'amd64'
@@ -118,23 +117,23 @@ Ensure-LocalVar -Name 'HpDriverPackCatalogCabUrl' -DefaultValue "https://ftp.hp.
 Ensure-ScriptVar -Name 'BuildForgeRoot'           -DefaultValue $null
 Ensure-ScriptVar -Name 'BuildForgeRootHistory'     -DefaultValue (New-Object System.Collections.Generic.List[string])
 
-Ensure-ScriptVar -Name 'Hardware'         -DefaultValue $null
-Ensure-ScriptVar -Name 'OSCatalog'        -DefaultValue $null
-Ensure-ScriptVar -Name 'DriverCatalog'    -DefaultValue $null
-Ensure-ScriptVar -Name 'OsEntry'          -DefaultValue $null
-Ensure-ScriptVar -Name 'OsUrl'            -DefaultValue $null
-Ensure-ScriptVar -Name 'OsSha1'           -DefaultValue $null
-Ensure-ScriptVar -Name 'OsSha256'         -DefaultValue $null
-Ensure-ScriptVar -Name 'OsPath'           -DefaultValue $null
-Ensure-ScriptVar -Name 'DriverMatch'      -DefaultValue $null
-Ensure-ScriptVar -Name 'DriverPackPath'   -DefaultValue $null
-Ensure-ScriptVar -Name 'DriverExtractDir' -DefaultValue $null
-Ensure-ScriptVar -Name 'TargetDisk'       -DefaultValue $null
-Ensure-ScriptVar -Name 'ImageIndexes'     -DefaultValue $null
-Ensure-ScriptVar -Name 'SelectedIndex'    -DefaultValue $null
-
-Ensure-ScriptVar -Name 'CurrentStepNumber' -DefaultValue ''
-Ensure-ScriptVar -Name 'CurrentStepName'   -DefaultValue ''
+Ensure-ScriptVar -Name 'Hardware'            -DefaultValue $null
+Ensure-ScriptVar -Name 'OSCatalog'           -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverCatalog'       -DefaultValue $null
+Ensure-ScriptVar -Name 'OsEntry'             -DefaultValue $null
+Ensure-ScriptVar -Name 'OsUrl'               -DefaultValue $null
+Ensure-ScriptVar -Name 'OsSha1'              -DefaultValue $null
+Ensure-ScriptVar -Name 'OsSha256'            -DefaultValue $null
+Ensure-ScriptVar -Name 'OsPath'              -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverMatch'         -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverPackPath'      -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverExtractDir'    -DefaultValue $null
+Ensure-ScriptVar -Name 'TargetDisk'          -DefaultValue $null
+Ensure-ScriptVar -Name 'ImageIndexes'        -DefaultValue $null
+Ensure-ScriptVar -Name 'SelectedIndex'       -DefaultValue $null
+Ensure-ScriptVar -Name 'CurrentStepNumber'   -DefaultValue ''
+Ensure-ScriptVar -Name 'CurrentStepName'     -DefaultValue ''
+Ensure-Var -Name 'HpDriverPackCatalogCabUrl' -DefaultValue 'https://ftp.hp.com/pub/caps-softpaq/cmit/HPClientDriverPackCatalog.cab'
 
 # Fixed log paths (these are used very early)
 Ensure-ScriptVar -Name 'LogRoot' -DefaultValue 'X:\Windows\Temp\BuildForge'
