@@ -139,7 +139,7 @@ Ensure-LocalVar -Name 'HpDriverPackCatalogCabUrl' -DefaultValue 'https://ftp.hp.
 Ensure-ScriptVar -Name 'BuildForgeRoot' -DefaultValue $null
 Ensure-ScriptVar -Name 'LogRoot'        -DefaultValue 'X:\Windows\Temp\BuildForge'
 Ensure-ScriptVar -Name 'LogFile'        -DefaultValue (Join-Path 'X:\Windows\Temp\BuildForge' 'BuildForge.log')
-
+Ensure-ScriptVar -Name 'BuildForgeRootHistory' -DefaultValue @()
 Ensure-ScriptVar -Name 'CurrentStepNumber' -DefaultValue ''
 Ensure-ScriptVar -Name 'CurrentStepName'   -DefaultValue ''
 
