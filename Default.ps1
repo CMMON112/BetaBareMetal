@@ -61,29 +61,35 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 # ---------------------------
-# Script-scope initialization
+# Parameter defaults bootstrap (StrictMode-safe for Invoke-Expression execution)
 # ---------------------------
-$script:BuildForgeRoot        = $null
-$script:Hardware              = $null
-$script:OSCatalog             = $null
-$script:DriverCatalog         = $null
-$script:OsEntry               = $null
-$script:OsUrl                 = $null
-$script:OsSha1                = $null
-$script:OsSha256              = $null
-$script:OsPath                = $null
-$script:DriverMatch           = $null
-$script:DriverPackPath        = $null
-$script:DriverExtractDir      = $null
-$script:TargetDisk            = $null
-$script:ImageIndexes          = $null
-$script:SelectedIndex         = $null
-$script:Resume                = $null 
-$script:BuildForgeRootHistory = New-Object System.Collections.Generic.List[string]
+function Ensure-Var {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)]$DefaultValue
+    )
+    if (-not (Get-Variable -Name $Name -Scope 0 -ErrorAction SilentlyContinue)) {
+        Set-Variable -Name $Name -Scope 0 -Value $DefaultValue -Force
+    }
+}
 
-# Current step tracking
-$script:CurrentStepNumber = ''
-$script:CurrentStepName   = ''
+# If this script is executed via Invoke-Expression, param() binding may not run,
+# so ensure every "param" variable exists with sane defaults.
+Ensure-Var -Name 'OperatingSystem'   -DefaultValue 'Windows 11'
+Ensure-Var -Name 'ReleaseId'         -DefaultValue '25H2'
+Ensure-Var -Name 'Architecture'      -DefaultValue 'amd64'
+Ensure-Var -Name 'LanguageCode'      -DefaultValue 'en-us'
+Ensure-Var -Name 'License'           -DefaultValue 'Volume'
+Ensure-Var -Name 'SKU'               -DefaultValue 'Enterprise'
+Ensure-Var -Name 'DriverCatalogUrl'  -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml"
+Ensure-Var -Name 'OSCatalogUrl'      -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
+Ensure-Var -Name 'TargetDiskNumber'  -DefaultValue -1
+Ensure-Var -Name 'ForceRepartition'  -DefaultValue $true
+Ensure-Var -Name 'ForceRedownload'   -DefaultValue $false
+Ensure-Var -Name 'ForceApplyImage'   -DefaultValue $false
+Ensure-Var -Name 'Resume'            -DefaultValue $false
+Ensure-Var -Name 'FromStep'          -DefaultValue $null
+Ensure-Var -Name 'OnlyStep'          -DefaultValue $null
 
 # ---------------------------
 # Fixed logging location (never moves)
