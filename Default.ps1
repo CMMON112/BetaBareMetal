@@ -95,27 +95,28 @@ function Ensure-ScriptVar {
 }
 
 # ---- "Parameter-like" variables (safe defaults when called with NO args) ----
-Ensure-LocalVar -Name 'Resume'          -DefaultValue $false
-Ensure-LocalVar -Name 'FromStep'        -DefaultValue $null
-Ensure-LocalVar -Name 'OnlyStep'        -DefaultValue $null
-Ensure-LocalVar -Name 'ForceRepartition'-DefaultValue $true
-Ensure-LocalVar -Name 'ForceRedownload' -DefaultValue $false
-Ensure-LocalVar -Name 'ForceApplyImage' -DefaultValue $false
-Ensure-LocalVar -Name 'TargetDiskNumber'-DefaultValue -1
+Ensure-LocalVar -Name 'Resume'                    -DefaultValue $false
+Ensure-LocalVar -Name 'FromStep'                  -DefaultValue $null
+Ensure-LocalVar -Name 'OnlyStep'                  -DefaultValue $null
+Ensure-LocalVar -Name 'ForceRepartition'          -DefaultValue $true
+Ensure-LocalVar -Name 'ForceRedownload'           -DefaultValue $false
+Ensure-LocalVar -Name 'ForceApplyImage'           -DefaultValue $false
+Ensure-LocalVar -Name 'TargetDiskNumber'          -DefaultValue -1
 
-Ensure-LocalVar -Name 'OperatingSystem' -DefaultValue 'Windows 11'
-Ensure-LocalVar -Name 'ReleaseId'       -DefaultValue '25H2'
-Ensure-LocalVar -Name 'Architecture'    -DefaultValue 'amd64'
-Ensure-LocalVar -Name 'LanguageCode'    -DefaultValue 'en-us'
-Ensure-LocalVar -Name 'License'         -DefaultValue 'Volume'
-Ensure-LocalVar -Name 'SKU'             -DefaultValue 'Enterprise'
-Ensure-LocalVar -Name 'DriverCatalogUrl'-DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml"
-Ensure-LocalVar -Name 'OSCatalogUrl'    -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
+Ensure-LocalVar -Name 'OperatingSystem'           -DefaultValue 'Windows 11'
+Ensure-LocalVar -Name 'ReleaseId'                 -DefaultValue '25H2'
+Ensure-LocalVar -Name 'Architecture'              -DefaultValue 'amd64'
+Ensure-LocalVar -Name 'LanguageCode'              -DefaultValue 'en-us'
+Ensure-LocalVar -Name 'License'                   -DefaultValue 'Volume'
+Ensure-LocalVar -Name 'SKU'                       -DefaultValue 'Enterprise'
+Ensure-LocalVar -Name 'DriverCatalogUrl'          -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml"
+Ensure-LocalVar -Name 'OSCatalogUrl'              -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
+Ensure-LocalVar -Name 'HpDriverPackCatalogCabUrl' -DefaultValue "https://ftp.hp.com/pub/caps-softpaq/cmit/HPClientDriverPackCatalog.cab"
 
 # ---- Script-scope variables referenced by banners/logging BEFORE Step 1 ----
 # These MUST exist under StrictMode 2.0 or the first read will terminate. [1](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/set-strictmode?view=powershell-7.5)
-Ensure-ScriptVar -Name 'BuildForgeRoot'        -DefaultValue $null
-Ensure-ScriptVar -Name 'BuildForgeRootHistory' -DefaultValue (New-Object System.Collections.Generic.List[string])
+Ensure-ScriptVar -Name 'BuildForgeRoot'           -DefaultValue $null
+Ensure-ScriptVar -Name 'BuildForgeRootHistory'     -DefaultValue (New-Object System.Collections.Generic.List[string])
 
 Ensure-ScriptVar -Name 'Hardware'         -DefaultValue $null
 Ensure-ScriptVar -Name 'OSCatalog'        -DefaultValue $null
@@ -279,6 +280,7 @@ function Write-StepBanner {
     Write-LogFileOnly -Message $diskLine -Level 'INFO'
     Write-LogFileOnly -Message ("StepSelection={0}" -f (Get-StepSelectionLabel)) -Level 'INFO'
 }
+
 function Convert-StepIdToNumber {
     param([Parameter(Mandatory)][string]$StepId)
 
@@ -832,6 +834,282 @@ function Find-DriverPackMatch {
     }
 }
 
+function Get-HPClientDriverPackCatalogXml {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$CabUrl,
+        [Parameter(Mandatory)][string]$WorkingDir
+    )
+
+    Update-BuildForgeRoot
+    Ensure-Dir $WorkingDir
+
+    $cabPath = Join-Path $WorkingDir "HPClientDriverPackCatalog.cab"
+    $xmlPath = Join-Path $WorkingDir "HPClientDriverPackCatalog.xml"
+
+    Invoke-Download -Url $CabUrl -DestPath $cabPath | Out-Null
+
+    # Expand CAB to XML. OSD does: Expand "cab" "xml" [1](https://www.powershellgallery.com/packages/OSD/21.4.8.1/Content/Public%5CCatalog%5CGet-CatalogHPDriverPack.ps1)
+    $expandExe = Join-Path $env:WINDIR "System32\expand.exe"
+    if (-not (Test-Path -LiteralPath $expandExe)) { $expandExe = "expand.exe" }
+
+    # Expand supports: expand <cab> <dest>
+    Invoke-Native -FilePath $expandExe -Arguments @($cabPath, $xmlPath) | Out-Null
+
+    if (-not (Test-Path -LiteralPath $xmlPath)) {
+        throw "Failed to expand HP catalog CAB to XML. Expected: $xmlPath"
+    }
+
+    Write-Log "HP DriverPack catalog expanded successfully." 'OK'
+    return $xmlPath
+}
+
+function Import-HPClientDriverPackCatalog {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$XmlPath)
+
+    [xml]$x = Get-Content -LiteralPath $XmlPath -Raw
+
+    # These nodes are explicitly used by OSD: SoftPaqList.SoftPaq and ProductOSDriverPackList.ProductOSDriverPack 
+    $softPaqs = @($x.NewDataSet.HPClientDriverPackCatalog.SoftPaqList.SoftPaq)
+    $mapRows  = @($x.NewDataSet.HPClientDriverPackCatalog.ProductOSDriverPackList.ProductOSDriverPack)
+
+    if (-not $softPaqs -or $softPaqs.Count -eq 0) { throw "HP catalog: SoftPaqList is empty." }
+    if (-not $mapRows  -or $mapRows.Count  -eq 0) { throw "HP catalog: ProductOSDriverPackList is empty." }
+
+    foreach ($m in $mapRows) {
+        if ($m.SystemId) { $m.SystemId = $m.SystemId.Trim() }
+    }
+
+    $results = New-Object System.Collections.Generic.List[object]
+
+    foreach ($sp in $softPaqs) {
+        $id = [string]$sp.Id
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+
+        $matches = $mapRows | Where-Object { $_.SoftPaqId -match $id }
+        if (-not $matches) { continue }
+
+        $results.Add([pscustomobject]@{
+            SoftPaqId    = [string]$sp.Id
+            Name         = [string]$sp.Name
+            Version      = [string]$sp.Version
+            DateReleased = (try { [datetime]$sp.DateReleased } catch { $null })
+            Url          = [string]$sp.Url
+            SystemIds    = @($matches | Select-Object -ExpandProperty SystemId -Unique)
+            OSNames      = @($matches | Select-Object -ExpandProperty OSName   -Unique)
+        }) | Out-Null
+    }
+
+    return $results
+}
+
+function Find-HPDriverPackBestMatch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Hardware,
+        [Parameter(Mandatory)][object[]]$HpCatalogItems,
+        [Parameter(Mandatory)][string]$ReleaseId
+    )
+
+    function Norm([string]$s) {
+        if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+        return ($s -replace '\s+',' ').Trim().ToUpperInvariant()
+    }
+
+    $hw = [pscustomobject]@{
+        CSManufacturer = Norm $Hardware.CSManufacturer
+        CSModel        = Norm $Hardware.CSModel
+        BBManufacturer = Norm $Hardware.BBManufacturer
+        BBModel        = Norm $Hardware.BBModel
+        BBSKU          = Norm $Hardware.BBSKU
+        BBProduct      = Norm $Hardware.BBProduct
+    }
+
+    # If not HP, return no match
+    if (-not ($hw.CSManufacturer -match 'HP|HEWLETT')) {
+        return [pscustomobject]@{ Matched=$false; Reason="Not an HP system"; Candidates=@() }
+    }
+
+    $wantOsToken = "WINDOWS 11"
+    $wantRelToken = $ReleaseId.ToUpperInvariant()
+
+    $scored = foreach ($item in $HpCatalogItems) {
+        $sysIds = @($item.SystemIds | ForEach-Object { Norm $_ })
+
+        $score = 0
+        $matched = @()
+
+        # OS preference
+        $osNames = @($item.OSNames | ForEach-Object { Norm $_ })
+        if ($osNames -match $wantOsToken) { $score += 10; $matched += "OS=Win11" }
+
+        # ReleaseId preference (best effort: match token anywhere in name)
+        $name = Norm $item.Name
+        if ($name -and $name -match $wantRelToken) { $score += 6; $matched += "Release=$ReleaseId" }
+
+        # Strong HP system id match
+        if ($hw.BBProduct -and ($sysIds -contains $hw.BBProduct)) { $score += 30; $matched += "SystemId(BBProduct)" }
+        if ($hw.BBSKU     -and ($sysIds -contains $hw.BBSKU))     { $score += 20; $matched += "SystemId(BBSKU)" }
+
+        # Weaker heuristics
+        if ($hw.CSModel -and $name -and $name -match [regex]::Escape($hw.CSModel)) { $score += 3; $matched += "ModelText" }
+
+        [pscustomobject]@{
+            Score   = $score
+            Matched = ($matched -join ',')
+            Item    = $item
+        }
+    }
+
+    $ordered = $scored | Sort-Object Score, @{e={$_.Item.DateReleased};Descending=$true} -Descending
+    $top = $ordered | Select-Object -First 1
+
+    if (-not $top -or $top.Score -lt 10 -or -not $top.Item.Url) {
+        return [pscustomobject]@{
+            Matched=$false
+            Reason=("No strong HP driver pack match found. BestScore={0}" -f $(if($top){$top.Score}else{'n/a'}))
+            Candidates=($ordered | Select-Object -First 10)
+        }
+    }
+    function Try-Extract-HPDriverPack {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SoftPaqPath,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    Ensure-Dir $Destination
+
+    try {
+        # Your existing extractor (SoftPaq switches) may work IF exe can run
+        Expand-HPSoftPaq -SoftPaqExe $SoftPaqPath -Destination $Destination
+
+        $infCount = (Get-ChildItem -LiteralPath $Destination -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
+        if ($infCount -gt 0) {
+            return [pscustomobject]@{ Extracted=$true; Path=$Destination; InfCount=$infCount; Reason="" }
+        }
+
+        return [pscustomobject]@{ Extracted=$false; Path=$Destination; InfCount=0; Reason="No INFs found after extraction attempt." }
+    }
+    catch {
+        # This is expected on many WinPE/WinRE x64 builds: 32-bit HP EXE won't run [3](https://stackoverflow.com/questions/509853/powershell-how-do-i-test-for-a-variable-value-with-set-strictmode-version-la)
+        return [pscustomobject]@{ Extracted=$false; Path=$Destination; InfCount=0; Reason=$_.Exception.Message }
+    }
+}
+function Inject-DriversOfflineWindows {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WindowsPath,   # e.g. W:\
+        [Parameter(Mandatory)][string]$DriverRoot     # extracted INF folder
+    )
+
+    $infCount = (Get-ChildItem -LiteralPath $DriverRoot -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
+    if ($infCount -eq 0) { throw "No INF files found under '$DriverRoot'." }
+
+    Ensure-DismModule
+    Write-Log ("Injecting drivers to offline Windows: {0} INF(s)" -f $infCount) 'INFO'
+
+    Add-WindowsDriver -Path $WindowsPath -Driver $DriverRoot -Recurse -ErrorAction Stop | Out-Null
+    Write-Log "Offline Windows driver injection complete." 'OK'
+}
+    return [pscustomobject]@{
+        Matched=$true
+        Score=$top.Score
+        MatchInfo=$top.Matched
+        DriverPackUrl=$top.Item.Url
+        SoftPaqId=$top.Item.SoftPaqId
+        Name=$top.Item.Name
+        Version=$top.Item.Version
+        DateReleased=$top.Item.DateReleased
+        SystemIds=$top.Item.SystemIds
+    }
+}
+function Get-InfClass {
+    param([Parameter(Mandatory)][string]$InfPath)
+    try {
+        $lines = Get-Content -LiteralPath $InfPath -ErrorAction Stop | Select-Object -First 200
+        foreach ($l in $lines) {
+            if ($l -match '^\s*Class\s*=\s*(.+?)\s*$') {
+                return $Matches[1].Trim()
+            }
+        }
+    } catch {}
+    return $null
+}
+
+function Stage-DriversByClass {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DriverRoot,
+        [Parameter(Mandatory)][string]$StageRoot,
+        [Parameter(Mandatory)][string[]]$IncludeClasses
+    )
+
+    Ensure-Dir $StageRoot
+    $infs = Get-ChildItem -LiteralPath $DriverRoot -Recurse -Filter *.inf -ErrorAction SilentlyContinue
+    if (-not $infs) { throw "No INF files found under '$DriverRoot'." }
+
+    $wanted = New-Object System.Collections.Generic.List[string]
+    foreach ($inf in $infs) {
+        $cls = Get-InfClass -InfPath $inf.FullName
+        if ($cls -and ($IncludeClasses -contains $cls)) {
+            $wanted.Add($inf.FullName) | Out-Null
+        }
+    }
+
+    if ($wanted.Count -eq 0) {
+        Write-Log ("No INFs matched classes: {0}" -f ($IncludeClasses -join ',')) 'WARN'
+        return $null
+    }
+
+    # Copy entire directories that contain matching INFs (keeps referenced binaries alongside)
+    $dirs = $wanted | ForEach-Object { Split-Path -Parent $_ } | Select-Object -Unique
+    foreach ($d in $dirs) {
+        $leaf = [IO.Path]::GetFileName($d)
+        $dest = Join-Path $StageRoot $leaf
+        Copy-Item -LiteralPath $d -Destination $dest -Recurse -Force
+    }
+
+    Write-Log ("Staged WinRE-class drivers. INF matches: {0}" -f $wanted.Count) 'OK'
+    return $StageRoot
+}
+
+function Inject-DriversIntoWinREWim {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WinreWimPath,
+        [Parameter(Mandatory)][string]$DriverRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $WinreWimPath)) { throw "WinRE WIM not found: $WinreWimPath" }
+
+    Ensure-DismModule
+
+    $mountDir = Join-Path $script:BuildForgeRoot ("MountWinRE_{0}" -f ([Guid]::NewGuid().ToString('N')))
+    Ensure-Dir $mountDir
+
+    try {
+        Write-Log ("Mounting WinRE WIM: {0}" -f $WinreWimPath) 'INFO'
+        Mount-WindowsImage -ImagePath $WinreWimPath -Index 1 -Path $mountDir -ErrorAction Stop | Out-Null
+
+        Write-Log "Injecting drivers into WinRE image..." 'INFO'
+        Add-WindowsDriver -Path $mountDir -Driver $DriverRoot -Recurse -ErrorAction Stop | Out-Null
+
+        Write-Log "Committing WinRE changes..." 'INFO'
+        Dismount-WindowsImage -Path $mountDir -Save -ErrorAction Stop | Out-Null
+
+        Write-Log "WinRE driver injection complete." 'OK'
+    }
+    catch {
+        # attempt discard if mounted
+        try { Dismount-WindowsImage -Path $mountDir -Discard -ErrorAction SilentlyContinue | Out-Null } catch {}
+        throw
+    }
+    finally {
+        Remove-Item -LiteralPath $mountDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 # ---------------------------
 # Disk selection + partitioning
 # ---------------------------
@@ -1287,17 +1565,45 @@ Invoke-Step "6" "Match OS entry from catalog" {
     Write-Detail ("OS image URL: {0}" -f $osUrl) 'INFO'
 }
 
-Invoke-Step "7" "Match driver pack from hardware and catalog" {
-    $res = Find-DriverPackMatch -Hardware $script:Hardware -DriverCatalog $script:DriverCatalog
-    $script:DriverMatch = $res
+Invoke-Step "7" "HP DriverPack match via HPClientDriverPackCatalog.cab" {
 
-    if ($res.Matched) {
-        Write-Log ("Driver pack matched (Score={0})" -f $res.Score) 'OK'
-        Write-Detail ("Matched fields: {0}" -f $res.MatchInfo) 'INFO'
-        Write-Detail ("Driver URL: {0}" -f $res.URL) 'INFO'
-    } else {
-        Write-Log ("No driver match met minimum score. {0}" -f $res.Reason) 'WARN'
+    # Only attempt on HP machines
+    if (-not ($script:Hardware.CSManufacturer -match 'HP|Hewlett')) {
+        Write-Log "Not an HP system. HP DriverPack catalog step skipped." 'INFO'
+        return
     }
+
+    Update-BuildForgeRoot
+    $hpCatDir = Join-Path $script:BuildForgeRoot 'Catalogs'
+    Ensure-Dir $hpCatDir
+
+    Write-Log "Downloading and expanding HP DriverPack catalog CAB..." 'INFO'
+    $xmlPath = Get-HPClientDriverPackCatalogXml -CabUrl $HpDriverPackCatalogCabUrl -WorkingDir $hpCatDir
+
+    Write-Log "Parsing HP DriverPack catalog XML..." 'INFO'
+    $hpItems = Import-HPClientDriverPackCatalog -XmlPath $xmlPath
+
+    Write-Log "Selecting best HP DriverPack match for Win11 (24H2+)..." 'INFO'
+    $match = Find-HPDriverPackBestMatch -Hardware $script:Hardware -HpItems $hpItems -ReleaseId $ReleaseId
+
+    if (-not $match.Matched) {
+        Write-Log ("HP DriverPack match failed: {0}" -f $match.Reason) 'WARN'
+        return
+    }
+
+    # Override/seed existing DriverMatch object so the rest of your pipeline stays unchanged
+    $script:DriverMatch = [pscustomobject]@{
+        Matched   = $true
+        URL       = $match.Url
+        Sha1      = $null
+        Sha256    = $null
+        Score     = $match.Score
+        MatchInfo = $match.MatchInfo
+    }
+
+    Write-Log ("HP DriverPack matched (Score={0})" -f $match.Score) 'OK'
+    Write-Detail ("Matched fields: {0}" -f $match.MatchInfo) 'INFO'
+    Write-Detail ("DriverPack URL: {0}" -f $match.Url) 'INFO'
 }
 
 Invoke-Step "8" "Select best local disk for OS" {
@@ -1545,6 +1851,21 @@ Invoke-Step "19" "Inject drivers into offline image (Add-WindowsDriver)" {
                           -ErrorAction Stop | Out-Null
         Write-Log "Driver injection completed." 'OK'
     }
+}
+Invoke-Step "19.5" "Inject System/HID/USB/Net drivers into WinRE.wim" {
+
+    if (-not $script:DriverExtractDir -or -not (Test-Path -LiteralPath $script:DriverExtractDir)) {
+        Write-Log "No extracted drivers directory found. WinRE injection skipped." 'WARN'
+        return
+    }
+
+    $subsetStage = Join-Path $script:BuildForgeRoot 'WinRE_ClassDrivers'
+    $subset = Stage-DriversByClass -DriverRoot $script:DriverExtractDir -StageRoot $subsetStage -IncludeClasses @('System','HIDClass','USB','Net')
+    if (-not $subset) { return }
+
+    # WinRE.wim path per your existing Step 17 copy location
+    $winreWim = 'R:\Recovery\WindowsRE\Winre.wim'
+    Inject-DriversIntoWinREWim -WinreWimPath $winreWim -DriverRoot $subset
 }
 
 Invoke-Step "20" "Summary" {
