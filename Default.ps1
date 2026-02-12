@@ -1670,81 +1670,107 @@ Invoke-Step "6" "Match OS entry from catalog" {
 
 Invoke-Step "7" "HP DriverPack match via HPClientDriverPackCatalog.cab" {
 
-    if (-not ($script:Hardware.CSManufacturer -match 'HP|Hewlett')) {
+    # -----------------------------------------------------------------
+    # Guard: HP systems only
+    # -----------------------------------------------------------------
+    if (-not ($script:Hardware.CSManufacturer -match '(?i)HP|Hewlett')) {
         Write-Log "Not an HP system. HP DriverPack catalog step skipped." 'INFO'
         return
     }
 
-    # Debug (optional)
+    # -----------------------------------------------------------------
+    # Debug: CAB URL sanity
+    # -----------------------------------------------------------------
     $raw = $HpDriverPackCatalogCabUrl
     $isEmpty = [string]::IsNullOrWhiteSpace($raw)
+
     Write-Log ("DEBUG HpDriverPackCatalogCabUrl raw: '{0}'" -f $raw) 'INFO'
     Write-Log ("DEBUG HpDriverPackCatalogCabUrl isNullOrWhiteSpace: {0}" -f $isEmpty) 'INFO'
-    if ($isEmpty) { throw "HpDriverPackCatalogCabUrl is empty at Step 7." }
 
+    if ($isEmpty) {
+        throw "HpDriverPackCatalogCabUrl is empty at Step 7."
+    }
+
+    # -----------------------------------------------------------------
+    # Download + expand HP catalog CAB
+    # -----------------------------------------------------------------
     Update-BuildForgeRoot
     $hpCatDir = Join-Path $script:BuildForgeRoot 'Catalogs'
     Ensure-Dir $hpCatDir
 
     Write-Log "Downloading and expanding HP DriverPack catalog CAB..." 'INFO'
-    $xmlPath = Get-HPClientDriverPackCatalogXml -CabUrl $HpDriverPackCatalogCabUrl -WorkingDir $hpCatDir
+    $xmlPath = Get-HPClientDriverPackCatalogXml `
+        -CabUrl $HpDriverPackCatalogCabUrl `
+        -WorkingDir $hpCatDir
 
+    # -----------------------------------------------------------------
+    # Parse catalog XML
+    # -----------------------------------------------------------------
     Write-Log "Parsing HP DriverPack catalog XML..." 'INFO'
     $hpCatalog = Import-HPClientDriverPackCatalog -XmlPath $xmlPath
-    # --- DEBUG: prove the SystemId + Win11 rows exist in the parsed map ---
-$sys = [string]$script:Hardware.BBProduct
-if ($sys) { $sys = $sys.Trim() }
-$sysU = if ($sys) { $sys.ToUpperInvariant() } else { '' }
 
-$rowsForSys = @($hpCatalog.DriverPackMap | Where-Object {
-    $_.SystemId -and ($_.SystemId.Trim().ToUpperInvariant() -eq $sysU)
-})
+    # -----------------------------------------------------------------
+    # DEBUG: prove SystemId + Win11 rows exist
+    # -----------------------------------------------------------------
+    $sys = [string]$script:Hardware.BBProduct
+    if ($sys) { $sys = $sys.Trim() }
+    $sysU = if ($sys) { $sys.ToUpperInvariant() } else { '' }
 
-Write-Log ("DEBUG HP map rows for SystemId '{0}': {1}" -f $sysU, $rowsForSys.Count) 'INFO'
+    $rowsForSys = @($hpCatalog.DriverPackMap | Where-Object {
+        $_.SystemId -and ($_.SystemId.Trim().ToUpperInvariant() -eq $sysU)
+    })
 
-$rowsWin11 = @($rowsForSys | Where-Object {
-    $_.OSName -and ($_.OSName -match '(?i)Windows\s+11') -and ($_.OSName -notmatch '(?i)Windows\s+10')
-})
+    Write-Log ("DEBUG HP map rows for SystemId '{0}': {1}" -f $sysU, $rowsForSys.Count) 'INFO'
 
-Write-Log ("DEBUG Win11 rows for SystemId '{0}': {1}" -f $sysU, $rowsWin11.Count) 'INFO'
+    $rowsWin11 = @($rowsForSys | Where-Object {
+        $_.OSName -and
+        ($_.OSName -match '(?i)Windows\s+11') -and
+        ($_.OSName -notmatch '(?i)Windows\s+10')
+    })
 
-# Show a few examples (avoid console spam; still junior-friendly)
-$rowsWin11 |
-    Select-Object OSName, SoftPaqId -Unique |
-    Select-Object -First 5 |
-    ForEach-Object { Write-Log ("DEBUG Example: OSName='{0}' SoftPaqId='{1}'" -f $_.OSName, $_.SoftPaqId) 'INFO' }
-}
-# --- END DEBUG ---
+    Write-Log ("DEBUG Win11 rows for SystemId '{0}': {1}" -f $sysU, $rowsWin11.Count) 'INFO'
 
+    $rowsWin11 |
+        Select-Object OSName, SoftPaqId -Unique |
+        Select-Object -First 3 |
+        ForEach-Object {
+            Write-Log ("DEBUG Example: OSName='{0}' SoftPaqId='{1}'" -f $_.OSName, $_.SoftPaqId) 'INFO'
+        }
+
+    # -----------------------------------------------------------------
+    # Select best HP DriverPack (Win11 only, ReleaseId preferred)
+    # -----------------------------------------------------------------
     Write-Log "Selecting best HP DriverPack match for Windows 11 (Release preference applied)..." 'INFO'
-    $match = Find-HPDriverPackBestMatch -Hardware $script:Hardware -HpCatalog $hpCatalog -ReleaseId $ReleaseId
 
-if (-not $match.Matched) {
-    Write-Log ("HP DriverPack match failed: {0}" -f $match.Reason) 'WARN'
-    return
-}
+    $match = Find-HPDriverPackBestMatch `
+        -Hardware  $script:Hardware `
+        -HpCatalog $hpCatalog `
+        -ReleaseId $ReleaseId
 
-$script:DriverMatch = [pscustomobject]@{
-    Matched   = $true
-    URL       = $match.Url
-    Sha1      = $null
-    Sha256    = $match.Sha256
-    Score     = $match.Rank
-    MatchInfo = ("SystemId={0}; OSName={1}; SoftPaqId={2}" -f $match.SystemId, $match.OSName, $match.SoftPaqId)
-}
+    if (-not $match.Matched) {
+        Write-Log ("HP DriverPack match failed: {0}" -f $match.Reason) 'WARN'
+        return
+    }
 
-Write-Log ("HP DriverPack matched: {0} ({1})" -f $match.SoftPaqId, $match.OSName) 'OK'
-Write-Detail ("HP DriverPack URL: {0}" -f $match.Url) 'INFO'
-Write-Detail ("HP DriverPack SHA256: {0}" -f $match.Sha256) 'INFO'
+    # -----------------------------------------------------------------
+    # Success logging
+    # -----------------------------------------------------------------
+    Write-Log ("HP DriverPack matched: {0} ({1})" -f $match.SoftPaqId, $match.OSName) 'OK'
+    Write-Detail ("HP DriverPack URL: {0}" -f $match.Url) 'INFO'
+    Write-Detail ("HP DriverPack SHA256: {0}" -f $match.Sha256) 'INFO'
+    Write-Detail ("Rank={0} DateReleased={1}" -f $match.Rank, $match.DateReleased) 'INFO'
 
-    # Seed DriverMatch for your existing Step 12/Confirm-FileHash
+    # -----------------------------------------------------------------
+    # Seed DriverMatch for downstream steps (download / hash / extract)
+    # -----------------------------------------------------------------
     $script:DriverMatch = [pscustomobject]@{
         Matched   = $true
         URL       = $match.Url
         Sha1      = $null
         Sha256    = $match.Sha256
         Score     = $match.Rank
-        MatchInfo = ("SystemId={0}; OSName={1}; SoftPaqId={2}" -f $match.SystemId, $match.OSName, $match.SoftPaqId)
+        MatchInfo = ("SystemId={0}; OSName={1}; SoftPaqId={2}" -f `
+                        $match.SystemId, $match.OSName, $match.SoftPaqId)
     }
 }
 
