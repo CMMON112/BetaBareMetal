@@ -62,28 +62,32 @@ param(
 # - Under ScriptBlock/Invoke-Expression, script params may not bind -> vars may not exist.
 # - StrictMode 2.0 throws on uninitialized variables, so predeclare everything we might read.
 # ---------------------------
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
 
 # =====================================================================
 # BuildForge StrictMode + ScriptBlock SAFE VARIABLE BOOTSTRAP
 # =====================================================================
-
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
 function Ensure-LocalVar {
     param(
         [Parameter(Mandatory=$true)][string]$Name,
         [Parameter()][AllowNull()]$DefaultValue = $null
     )
 
-    $v = Get-Variable -Name $Name -Scope Local -ErrorAction SilentlyContinue
+    # Scope 1 = the caller's scope (this is what you intended)
+    $v = Get-Variable -Name $Name -Scope 1 -ErrorAction SilentlyContinue
 
-    # Variable does not exist
+    # Not present in caller
     if (-not $v) {
-        Set-Variable -Name $Name -Scope Local -Value $DefaultValue -Force
+        Set-Variable -Name $Name -Scope 1 -Value $DefaultValue -Force
         return
     }
 
-    # Variable exists but is empty string → overwrite
+    # Present but empty string in caller
     if ($v.Value -is [string] -and [string]::IsNullOrWhiteSpace($v.Value)) {
-        Set-Variable -Name $Name -Scope Local -Value $DefaultValue -Force
+        Set-Variable -Name $Name -Scope 1 -Value $DefaultValue -Force
     }
 }
 
