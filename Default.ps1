@@ -69,13 +69,19 @@ param(
 
 function Ensure-LocalVar {
     param(
-        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory=$true)][string]$Name,
         [Parameter()][AllowNull()]$DefaultValue = $null
     )
 
     $v = Get-Variable -Name $Name -Scope Local -ErrorAction SilentlyContinue
 
-    if (-not $v -or ($v.Value -is [string] -and [string]::IsNullOrWhiteSpace($v.Value))) {
+    if (-not $v) {
+        Set-Variable -Name $Name -Scope Local -Value $DefaultValue -Force
+        return
+    }
+
+    # If it exists but is empty string, overwrite with default
+    if ($v.Value -is [string] -and [string]::IsNullOrWhiteSpace([string]$v.Value)) {
         Set-Variable -Name $Name -Scope Local -Value $DefaultValue -Force
     }
 }
