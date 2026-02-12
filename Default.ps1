@@ -426,6 +426,16 @@ function Invoke-Native {
     $psi.RedirectStandardError  = $true
     $psi.UseShellExecute        = $false
     $psi.CreateNoWindow         = $true
+    
+        try {
+    if (Test-Path -LiteralPath $env:WINDIR) {
+        $psi.WorkingDirectory = $env:WINDIR
+    } else {
+        $psi.WorkingDirectory = 'X:\'
+    }
+} catch {
+    $psi.WorkingDirectory = 'X:\'
+}
 
     $p = New-Object System.Diagnostics.Process
     $p.StartInfo = $psi
@@ -726,7 +736,7 @@ function Apply-UEFIPartitionLayout {
     [CmdletBinding(SupportsShouldProcess)]
     param([Parameter(Mandatory)][int]$DiskNumber, [int]$RecoveryMB=800, [int]$EfiMB=300)
 
-    $dp = @(
+    $dpLines = @(
         "select disk $DiskNumber",
         "clean",
         "convert gpt",
@@ -744,11 +754,31 @@ function Apply-UEFIPartitionLayout {
         'set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"',
         "gpt attributes=0x8000000000000001",
         "exit"
-    ) -join "`r`n"
+    )
 
-    if ($PSCmdlet.ShouldProcess("Disk $DiskNumber", "Wipe and apply UEFI/GPT layout (S:,W:,R:)")) {
-        $dp | diskpart | Out-Null
+    if (-not $PSCmdlet.ShouldProcess("Disk $DiskNumber", "Wipe and apply UEFI/GPT layout (S:,W:,R:)")) {
+        return
     }
+
+    # Always write script to a stable location on X: in WinRE
+    Initialize-Logging
+    $dpFile = Join-Path $script:LogRoot ("diskpart_{0}.txt" -f ([Guid]::NewGuid().ToString('N')))
+    Set-Content -LiteralPath $dpFile -Value ($dpLines -join "`r`n") -Encoding ASCII -Force
+
+    # Resolve diskpart path reliably
+    $diskpart = Join-Path $env:WINDIR 'System32\diskpart.exe'
+    if (-not (Test-Path -LiteralPath $diskpart)) { $diskpart = 'diskpart.exe' }
+
+    # Ensure current location is valid BEFORE starting an external process
+    try { Set-Location -LiteralPath $env:WINDIR } catch { Set-Location -LiteralPath 'X:\' }
+
+    Write-Log ("Running disk partitioning script: {0}" -f $dpFile) 'INFO'
+
+    # Run diskpart with a script file (more reliable than piping)
+    $null = Invoke-Native -FilePath $diskpart -Arguments @("/s", $dpFile)
+
+    # Cleanup the script file (optional)
+    Remove-Item -LiteralPath $dpFile -Force -ErrorAction SilentlyContinue
 }
 
 # ---------------------------
