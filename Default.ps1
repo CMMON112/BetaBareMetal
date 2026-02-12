@@ -1287,7 +1287,7 @@ function Get-TargetDisk {
 
 function Apply-UEFIPartitionLayout {
     [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][int]$DiskNumber, [int]$RecoveryMB=800, [int]$EfiMB=300)
+    param([Parameter(Mandatory)][int]$DiskNumber, [int]$RecoveryMB=950, [int]$EfiMB=300)
 
     $dpLines = @(
         "select disk $DiskNumber",
