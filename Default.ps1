@@ -713,15 +713,23 @@ function Get-ProcessTreePids {
 }
 
 function Wait-ProcessTree {
-    param([Parameter(Mandatory)][int]$RootPid, [int]$PollSeconds=1)
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [int] $RootPid,
+
+        [int] $PollSeconds = 1
+    )
 
     while ($true) {
         $pids = Get-ProcessTreePids -RootPid $RootPid
-        $alive = $false
-        foreach ($pid in $pids) {
-            if (Get-Process -Id $pid -ErrorAction SilentlyContinue) { $alive = $true; break }
+
+        $anyAlive = $false
+        foreach ($p in $pids) {
+            if (Get-Process -Id $p -ErrorAction SilentlyContinue) { $anyAlive = $true; break }
         }
-        if (-not $alive) { break }
+
+        if (-not $anyAlive) { break }
         Start-Sleep -Seconds $PollSeconds
     }
 }
@@ -736,23 +744,37 @@ function Expand-HPSoftPaq {
         [string] $Destination
     )
 
-    # Resolve moved EXE path (handles BuildForgeRoot relocation)
-    $SoftPaqExe = Resolve-ArtifactPath -Path $SoftPaqExe
+    # Ensure destination exists
+    Ensure-Dir $Destination
 
     if (-not (Test-Path -LiteralPath $SoftPaqExe)) {
         throw "Expand-HPSoftPaq: SoftPaq EXE not found: $SoftPaqExe"
     }
 
-    Ensure-Dir $Destination
+    $exeAbs = (Resolve-Path -LiteralPath $SoftPaqExe).Path
 
-    # HP SoftPaq unpack switches
-    $args = @("-pdf", "-f$Destination", "-s")
+    # Detect supported args by asking for help output (many SoftPaqs print usage on /?)
+    $help = ''
+    try {
+        $help = & $exeAbs '/?' 2>&1 | Out-String
+    } catch {
+        # ignore if help invocation fails
+    }
+
+    # Choose argument style
+    if ($help -match '(?i)Usage:\s*/s\s*/e\s*/f') {
+        # Newer packaging: /s /e /f <target-path>
+        $args = @('/s', '/e', '/f', $Destination)
+        Write-Log "SoftPaq supports /s /e /f. Using: $($args -join ' ')" 'INFO'
+    }
+    else {
+        # Classic HP SoftPaq: -pdf -f<path> -s
+        $args = @('-pdf', "-f$Destination", '-s')
+        Write-Log "SoftPaq did not advertise /s /e /f. Falling back to: $($args -join ' ')" 'INFO'
+    }
 
     Write-Log "Extracting HP SoftPaq -> $Destination" 'INFO'
-    Write-Log "SoftPaq EXE resolved path: $SoftPaqExe" 'INFO'
-
-    # Use full absolute path to avoid Start-Process resolution issues
-    $exeAbs = (Resolve-Path -LiteralPath $SoftPaqExe).Path
+    Write-Log "SoftPaq EXE resolved path: $exeAbs" 'INFO'
 
     $p = Start-Process -FilePath $exeAbs -ArgumentList $args -PassThru -WindowStyle Hidden
     Wait-ProcessTree -RootPid $p.Id
@@ -803,6 +825,31 @@ function Resolve-ArtifactPath {
 
     throw "Resolve-ArtifactPath: File not found. Original='$Path'. Looked for '$leaf' under current/known BuildForge roots."
 }
+
+function Get-ProcessTreePids {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [int] $RootPid
+    )
+
+    $seen  = New-Object System.Collections.Generic.HashSet[int]
+    $queue = New-Object System.Collections.Generic.Queue[int]
+    [void]$queue.Enqueue($RootPid)
+
+    while ($queue.Count -gt 0) {
+        $curPid = $queue.Dequeue()
+        if (-not $seen.Add($curPid)) { continue }
+
+        $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$curPid" -ErrorAction SilentlyContinue
+        foreach ($c in $children) {
+            [void]$queue.Enqueue([int]$c.ProcessId)
+        }
+    }
+
+    return $seen
+}
+
 # ---------------------------
 # MAIN
 # ---------------------------
@@ -1061,6 +1108,8 @@ Invoke-Step " 18) Extract HP driver pack silently (wait for full process tree)" 
     }
 
     $script:DriverExtractDir = $extractDir
+    $infCount = (Get-ChildItem -LiteralPath $Destination -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
+    Write-Log "INF files found after extraction: $infCount" 'INFO'
 }
 
 Invoke-Step " 19) Inject drivers into offline image (DISM /Add-Driver /Recurse)" {
