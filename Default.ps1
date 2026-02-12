@@ -314,6 +314,84 @@ function Update-BuildForgeRoot {
         Ensure-Dir $script:BuildForgeRoot
     }
 }
+function Invoke-FilesystemPreflight {
+    [CmdletBinding()]
+    param(
+        [switch] $RequireWindowsPartition,
+        [switch] $RequireEfiPartition,
+        [switch] $RequireRecoveryPartition
+    )
+
+    Write-Log "Pre-flight check: validating filesystem and workspace layout." 'INFO'
+
+    # Always re-evaluate root after any disk operations or reruns
+    Update-BuildForgeRoot
+
+    # ---- Drive presence checks ----
+    function Test-Drive([string]$Drive, [string]$Purpose, [switch]$Required) {
+        $path = "$Drive\"
+        if (Test-Path -LiteralPath $path) {
+            Write-Log ("Drive present: {0} ({1})" -f $Drive, $Purpose) 'OK'
+            return $true
+        }
+
+        if ($Required) {
+            throw "Required drive is missing: $Drive ($Purpose). Cannot continue."
+        } else {
+            Write-Log ("Drive missing: {0} ({1})" -f $Drive, $Purpose) 'WARN'
+            return $false
+        }
+    }
+
+    $haveW = Test-Drive -Drive 'W:' -Purpose 'Windows (offline OS target)' -Required:$RequireWindowsPartition
+    $haveS = Test-Drive -Drive 'S:' -Purpose 'EFI System Partition'         -Required:$RequireEfiPartition
+    $haveR = Test-Drive -Drive 'R:' -Purpose 'Recovery Partition'           -Required:$RequireRecoveryPartition
+
+    # ---- BuildForge root checks ----
+    if (-not $script:BuildForgeRoot) {
+        throw "BuildForgeRoot is not set. Update-BuildForgeRoot did not resolve a workspace root."
+    }
+
+    Ensure-Dir $script:BuildForgeRoot
+    Write-Log ("Workspace root ready: {0}" -f $script:BuildForgeRoot) 'OK'
+
+    # Required subfolders for deterministic reruns
+    $dirs = @(
+        (Join-Path $script:BuildForgeRoot 'Catalogs'),
+        (Join-Path $script:BuildForgeRoot 'OS'),
+        (Join-Path $script:BuildForgeRoot 'Drivers'),
+        (Join-Path $script:BuildForgeRoot 'ExtractedDrivers')
+    )
+
+    foreach ($d in $dirs) {
+        Ensure-Dir $d
+        Write-Log ("Directory ready: {0}" -f $d) 'OK'
+    }
+
+    # ---- Writability checks (tiny file, then remove) ----
+    function Assert-Writable([string]$Folder) {
+        $testFile = Join-Path $Folder ("__write_test_{0}.tmp" -f ([Guid]::NewGuid().ToString('N')))
+        try {
+            "test" | Set-Content -LiteralPath $testFile -Encoding ASCII -Force
+            Remove-Item -LiteralPath $testFile -Force
+            Write-Log ("Writable: {0}" -f $Folder) 'OK'
+        } catch {
+            throw "Folder is not writable: $Folder. Error: $($_.Exception.Message)"
+        }
+    }
+
+    # Always test root; test OS/Catalogs as those are most sensitive to rerun failures
+    Assert-Writable -Folder $script:BuildForgeRoot
+    Assert-Writable -Folder (Join-Path $script:BuildForgeRoot 'Catalogs')
+    Assert-Writable -Folder (Join-Path $script:BuildForgeRoot 'OS')
+
+    # If W: is expected, verify it is writable too (catches partial mount issues)
+    if ($RequireWindowsPartition -and $haveW) {
+        Assert-Writable -Folder 'W:\'
+    }
+
+    Write-Log "Pre-flight check passed." 'OK'
+}
 
 # ---------------------------
 # Native execution / curl downloads (WinRE friendly)
@@ -1079,6 +1157,13 @@ Invoke-Step "9" "Partition disk (UEFI/GPT) if needed" {
         Write-Log "Partition layout already present (S:, W:, R:). Skipped." 'OK'
     }
 }
+
+
+Invoke-Step "9.5" "Pre-flight filesystem sanity check" {
+    # After partitioning, require W: and S: (R: optional depending on your layout timing)
+    Invoke-FilesystemPreflight -RequireWindowsPartition -RequireEfiPartition
+}
+
 
 Invoke-Step "10" "Move BuildForge root to W: (when W: exists)" {
     Update-BuildForgeRoot
