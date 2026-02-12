@@ -1709,8 +1709,10 @@ $rowsWin11 = @($rowsForSys | Where-Object {
 Write-Log ("DEBUG Win11 rows for SystemId '{0}': {1}" -f $sysU, $rowsWin11.Count) 'INFO'
 
 # Show a few examples (avoid console spam; still junior-friendly)
-$rowsWin11 | Select-Object -First 3 | ForEach-Object {
-    Write-Log ("DEBUG Example: OSName='{0}' SoftPaqId='{1}'" -f $_.OSName, $_.SoftPaqId) 'INFO'
+$rowsWin11 |
+    Select-Object OSName, SoftPaqId -Unique |
+    Select-Object -First 5 |
+    ForEach-Object { Write-Log ("DEBUG Example: OSName='{0}' SoftPaqId='{1}'" -f $_.OSName, $_.SoftPaqId) 'INFO' }
 }
 # --- END DEBUG ---
 
