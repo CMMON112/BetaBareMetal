@@ -1589,6 +1589,21 @@ Invoke-Step "7" "HP DriverPack match via HPClientDriverPackCatalog.cab" {
         return
     }
 
+    # ---------------- DEBUG: Cab URL sanity (PS 5.1 safe) ----------------
+    $raw = $HpDriverPackCatalogCabUrl
+    $isEmpty = [string]::IsNullOrWhiteSpace($raw)
+    $len = 0
+    if (-not $isEmpty) { $len = $raw.Length }
+
+    Write-Log ("DEBUG HpDriverPackCatalogCabUrl raw: '{0}'" -f $raw) 'INFO'
+    Write-Log ("DEBUG HpDriverPackCatalogCabUrl isNullOrWhiteSpace: {0}" -f $isEmpty) 'INFO'
+    Write-Log ("DEBUG HpDriverPackCatalogCabUrl length: {0}" -f $len) 'INFO'
+
+    if ($isEmpty) {
+        throw "HpDriverPackCatalogCabUrl is empty at Step 7 (shadowed/overwritten before bootstrap)."
+    }
+    # --------------------------------------------------------------------
+
     Update-BuildForgeRoot
     $hpCatDir = Join-Path $script:BuildForgeRoot 'Catalogs'
     Ensure-Dir $hpCatDir
