@@ -72,7 +72,10 @@ function Ensure-LocalVar {
         [Parameter(Mandatory)][string]$Name,
         [Parameter()][AllowNull()]$DefaultValue = $null
     )
-    if (-not (Get-Variable -Name $Name -Scope Local -ErrorAction SilentlyContinue)) {
+
+    $v = Get-Variable -Name $Name -Scope Local -ErrorAction SilentlyContinue
+
+    if (-not $v -or ($v.Value -is [string] -and [string]::IsNullOrWhiteSpace($v.Value))) {
         Set-Variable -Name $Name -Scope Local -Value $DefaultValue -Force
     }
 }
