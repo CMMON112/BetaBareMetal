@@ -1692,6 +1692,28 @@ Invoke-Step "7" "HP DriverPack match via HPClientDriverPackCatalog.cab" {
 
     Write-Log "Parsing HP DriverPack catalog XML..." 'INFO'
     $hpCatalog = Import-HPClientDriverPackCatalog -XmlPath $xmlPath
+    # --- DEBUG: prove the SystemId + Win11 rows exist in the parsed map ---
+$sys = [string]$script:Hardware.BBProduct
+if ($sys) { $sys = $sys.Trim() }
+$sysU = if ($sys) { $sys.ToUpperInvariant() } else { '' }
+
+$rowsForSys = @($hpCatalog.DriverPackMap | Where-Object {
+    $_.SystemId -and ($_.SystemId.Trim().ToUpperInvariant() -eq $sysU)
+})
+
+Write-Log ("DEBUG HP map rows for SystemId '{0}': {1}" -f $sysU, $rowsForSys.Count) 'INFO'
+
+$rowsWin11 = @($rowsForSys | Where-Object {
+    $_.OSName -and ($_.OSName -match '(?i)Windows\s+11') -and ($_.OSName -notmatch '(?i)Windows\s+10')
+})
+
+Write-Log ("DEBUG Win11 rows for SystemId '{0}': {1}" -f $sysU, $rowsWin11.Count) 'INFO'
+
+# Show a few examples (avoid console spam; still junior-friendly)
+$rowsWin11 | Select-Object -First 3 | ForEach-Object {
+    Write-Log ("DEBUG Example: OSName='{0}' SoftPaqId='{1}'" -f $_.OSName, $_.SoftPaqId) 'INFO'
+}
+# --- END DEBUG ---
 
     Write-Log "Selecting best HP DriverPack match for Windows 11 (Release preference applied)..." 'INFO'
     $match = Find-HPDriverPackBestMatch -Hardware $script:Hardware -HpCatalog $hpCatalog -ReleaseId $ReleaseId
