@@ -99,13 +99,11 @@ function Write-Log {
         [ValidateSet('INFO','WARN','ERROR','OK','STEP')]
         [string] $Level = 'INFO',
 
-        # Optional structured metadata for clearer output
         [string] $StepName,
         [string] $Context,
         [string] $Detail
     )
 
-    # Skip empty/whitespace messages safely
     if ([string]::IsNullOrWhiteSpace($Message)) { return }
 
     Initialize-Logging
@@ -115,16 +113,19 @@ function Write-Log {
         $StepName = $script:CurrentStepName
     }
 
-    $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    # Format message for readability (your existing helper)
+    $msg = Format-LogMessage -Message $Message
 
     $stepTag = if ([string]::IsNullOrWhiteSpace($StepName)) { '' } else { " [STEP:$StepName]" }
     $ctxTag  = if ([string]::IsNullOrWhiteSpace($Context)) { '' } else { " Context: $Context." }
     $detTag  = if ([string]::IsNullOrWhiteSpace($Detail))  { '' } else { " Detail: $Detail" }
 
-    $msg = Format-LogMessage -Message $Message
+    # Console line: no datetime (easy to read)
+    $consoleLine = "[$Level]$stepTag $msg$ctxTag$detTag"
 
-    # Final line content (screen + file)
-    $line = "$ts [$Level]$stepTag $msg$ctxTag$detTag"
+    # File line: include datetime (keeps forensic value)
+    $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $fileLine = "$ts [$Level]$stepTag $msg$ctxTag$detTag"
 
     $color = switch ($Level) {
         'STEP'  { 'Cyan' }
@@ -134,9 +135,10 @@ function Write-Log {
         default { 'Gray' }
     }
 
-    Write-Host $line -ForegroundColor $color
-    [System.IO.File]::AppendAllText($script:LogFile, $line + "`r`n")
+    Write-Host $consoleLine -ForegroundColor $color
+    [System.IO.File]::AppendAllText($script:LogFile, $fileLine + "`r`n")
 }
+
 
 function Invoke-Step {
     param(
