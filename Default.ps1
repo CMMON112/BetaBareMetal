@@ -136,12 +136,12 @@ Ensure-LocalVar -Name 'HpDriverPackCatalogCabUrl' -DefaultValue 'https://ftp.hp.
 # ---------------------------------------------------------------------
 # Script-scope state (used by banners, logging, steps)
 # ---------------------------------------------------------------------
-Ensure-ScriptVar -Name 'BuildForgeRoot' -DefaultValue $null
-Ensure-ScriptVar -Name 'LogRoot'        -DefaultValue 'X:\Windows\Temp\BuildForge'
-Ensure-ScriptVar -Name 'LogFile'        -DefaultValue (Join-Path 'X:\Windows\Temp\BuildForge' 'BuildForge.log')
-Ensure-ScriptVar -Name 'BuildForgeRootHistory' -DefaultValue @()
-Ensure-ScriptVar -Name 'CurrentStepNumber' -DefaultValue ''
-Ensure-ScriptVar -Name 'CurrentStepName'   -DefaultValue ''
+Ensure-ScriptVar -Name 'BuildForgeRoot'        -DefaultValue $null
+Ensure-ScriptVar -Name 'LogRoot'               -DefaultValue 'X:\Windows\Temp\BuildForge'
+Ensure-ScriptVar -Name 'LogFile'               -DefaultValue (Join-Path 'X:\Windows\Temp\BuildForge' 'BuildForge.log')
+Ensure-ScriptVar -Name 'BuildForgeRootHistory' -DefaultValue (New-Object System.Collections.ArrayList)
+Ensure-ScriptVar -Name 'CurrentStepNumber'     -DefaultValue ''
+Ensure-ScriptVar -Name 'CurrentStepName'       -DefaultValue ''
 
 # ---------------------------------------------------------------------
 # Hardware identity (populated later)
@@ -151,8 +151,8 @@ Ensure-ScriptVar -Name 'Hardware' -DefaultValue $null
 # ---------------------------------------------------------------------
 # Driver selection & processing state
 # ---------------------------------------------------------------------
-Ensure-ScriptVar -Name 'DriverMatch'        -DefaultValue $null
-Ensure-ScriptVar -Name 'DriverExtractDir'   -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverMatch'         -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverExtractDir'    -DefaultValue $null
 Ensure-ScriptVar -Name 'TargetDisk'          -DefaultValue $null
 
 # ---------------------------------------------------------------------
@@ -461,20 +461,41 @@ function Move-BuildForgeContents {
 }
 
 function Update-BuildForgeRoot {
+
+    # Determine the correct root based on current disk availability
     $newRoot = Get-BuildForgeRoot
+
+    # First-time initialization
     if (-not $script:BuildForgeRoot) {
         $script:BuildForgeRoot = $newRoot
         Ensure-Dir $script:BuildForgeRoot
         return
     }
-    if ($script:BuildForgeRoot -ne $newRoot) {
-        $script:BuildForgeRootHistory.Add($script:BuildForgeRoot) | Out-Null
-        Write-Log ("Working root directory moved to {0}" -f $newRoot) 'INFO'
-        Write-Detail ("Previous root was {0}" -f $script:BuildForgeRoot) 'INFO'
-        Move-BuildForgeContents -Source $script:BuildForgeRoot -Destination $newRoot
-        $script:BuildForgeRoot = $newRoot
-        Ensure-Dir $script:BuildForgeRoot
+
+    # No change – nothing to do
+    if ($script:BuildForgeRoot -eq $newRoot) {
+        return
     }
+
+    # Defensive check: history must be a mutable list
+    if (-not ($script:BuildForgeRootHistory -is [System.Collections.IList])) {
+        throw "BuildForgeRootHistory is not a mutable list. Expected ArrayList."
+    }
+
+    # Record previous root before switching
+    $null = $script:BuildForgeRootHistory.Add($script:BuildForgeRoot)
+
+    Write-Log ("Working root directory moved to {0}" -f $newRoot) 'INFO'
+    Write-Detail ("Previous root was {0}" -f $script:BuildForgeRoot) 'INFO'
+
+    # Move contents to the new root
+    Move-BuildForgeContents `
+        -Source      $script:BuildForgeRoot `
+        -Destination $newRoot
+
+    # Update active root and ensure directory exists
+    $script:BuildForgeRoot = $newRoot
+    Ensure-Dir $script:BuildForgeRoot
 }
 function Invoke-FilesystemPreflight {
     [CmdletBinding()]
