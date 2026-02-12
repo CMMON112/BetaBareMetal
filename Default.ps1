@@ -1093,48 +1093,58 @@ function Find-HPDriverPackBestMatch {
         }
     }
 
-    return [pscustomobject]@{
-        Matched      = $true
-        SystemId     = $bbProduct
-        OSName       = $best.Candidate.Row.OSName
-        SoftPaqId    = $best.SoftPaq.Id
-        Url          = $best.SoftPaq.Url
-        Sha256       = $best.SoftPaq.Sha256
-        Name         = $best.SoftPaq.Name
-        Version      = $best.SoftPaq.Version
-        DateReleased = $best.SoftPaq.DateReleased
-        Rank         = $bestRank
-    }
+return [pscustomobject]@{
+    Matched      = $true
+    Score        = $top.Score
+    MatchInfo    = $top.Matched
+    DriverPackUrl= $top.Url
+    SoftPaqId    = $top.Item.SoftPaqId
+    Name         = $top.Item.Name
+    Version      = $top.Item.Version
+    DateReleased = $top.Item.DateReleased
+    SystemIds    = $top.Item.SystemIds
+}
 }
 
 function Inject-DriversOfflineWindows {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$WindowsPath,   # e.g. W:\
-        [Parameter(Mandatory)][string]$DriverRoot     # extracted INF folder
+        [Parameter(Mandatory)]
+        [string]$WindowsPath,   # e.g. W:\
+
+        [Parameter(Mandatory)]
+        [string]$DriverRoot     # extracted INF folder
     )
 
-    $infCount = (Get-ChildItem -LiteralPath $DriverRoot -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
-    if ($infCount -eq 0) { throw "No INF files found under '$DriverRoot'." }
+    if (-not (Test-Path -LiteralPath $WindowsPath)) {
+        throw "WindowsPath does not exist: $WindowsPath"
+    }
+
+    if (-not (Test-Path -LiteralPath $DriverRoot)) {
+        throw "DriverRoot does not exist: $DriverRoot"
+    }
+
+    $infCount = (
+        Get-ChildItem -LiteralPath $DriverRoot -Recurse -Filter *.inf -ErrorAction SilentlyContinue |
+        Measure-Object
+    ).Count
+
+    if ($infCount -eq 0) {
+        throw "No INF files found under '$DriverRoot'."
+    }
 
     Ensure-DismModule
     Write-Log ("Injecting drivers to offline Windows: {0} INF(s)" -f $infCount) 'INFO'
 
-    Add-WindowsDriver -Path $WindowsPath -Driver $DriverRoot -Recurse -ErrorAction Stop | Out-Null
+    Add-WindowsDriver `
+        -Path $WindowsPath `
+        -Driver $DriverRoot `
+        -Recurse `
+        -ErrorAction Stop | Out-Null
+
     Write-Log "Offline Windows driver injection complete." 'OK'
 }
-    return [pscustomobject]@{
-        Matched=$true
-        Score=$top.Score
-        MatchInfo=$top.Matched
-        DriverPackUrl=$top.Item.Url
-        SoftPaqId=$top.Item.SoftPaqId
-        Name=$top.Item.Name
-        Version=$top.Item.Version
-        DateReleased=$top.Item.DateReleased
-        SystemIds=$top.Item.SystemIds
-    }
-}
+
 function Get-InfClass {
     param([Parameter(Mandatory)][string]$InfPath)
     try {
