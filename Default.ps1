@@ -1,3 +1,15 @@
+<# Assumtions:
+1. Always runs in WinRE
+2. WinRE allways has powershell 5.1
+3. Always runs with StrictMode Version 2.0
+4. Must be able to be re-run without reloading or rebooting into WinRE
+5. WinRE has WinPE OCs installed
+6. Must never use syntax or features that are not present in Powershell 5.1
+7. Must be easy to diagnose from the console window for Jr Techs but with enough information on errors to diagnose via escalation to a more senior tech
+
+#>
+
+
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateSet('Windows 11')]
@@ -25,7 +37,14 @@ param(
     [int]    $TargetDiskNumber = -1,
     [bool]   $ForceRepartition = $true,
     [switch] $ForceRedownload,
-    [switch] $ForceApplyImage
+    [switch] $ForceApplyImage,
+    
+    [ValidatePattern('^\d+(\.\d+)?$')]
+    [string] $FromStep = '',
+
+    [ValidatePattern('^\d+(\.\d+)?$')]
+    [string] $OnlyStep = ''
+
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,7 +63,7 @@ $script:OsSha1                = $null
 $script:OsSha256              = $null
 $script:OsPath                = $null
 $script:DriverMatch           = $null
-$script:DriverPackPath         = $null
+$script:DriverPackPath        = $null
 $script:DriverExtractDir      = $null
 $script:TargetDisk            = $null
 $script:ImageIndexes          = $null
@@ -176,11 +195,13 @@ function Write-StepBanner {
 
     Write-Host ("  OS     : Windows 11 {0} {1} ({2}, {3})" -f $ReleaseId, $Architecture, $SKU, $License) -ForegroundColor Gray
     Write-Host ("  Root   : {0}" -f $root) -ForegroundColor Gray
-    Write-Host ("  Flags  : Repartition={0}  Redownload={1}  Reapply={2}" -f `
+    Write-Host ("  Flags  : Repartition={0}  Redownload={1}  Reapply={2}  Resume={3}  Steps={4}" -f `
         ($(if($ForceRepartition){'Yes'}else{'No'})),
         ($(if([bool]$ForceRedownload){'Yes'}else{'No'})),
-        ($(if([bool]$ForceApplyImage){'Yes'}else{'No'}))
-    ) -ForegroundColor Gray
+        ($(if([bool]$ForceApplyImage){'Yes'}else{'No'})),
+        ($(if([bool]$Resume){'Yes'}else{'No'})),
+        (Get-StepSelectionLabel)
+) -ForegroundColor Gray
     Write-Host ("  {0}" -f $diskLine) -ForegroundColor Gray
     Write-Host ""
 
@@ -190,6 +211,44 @@ function Write-StepBanner {
     Write-LogFileOnly -Message ("Root={0}" -f $root) -Level 'INFO'
     Write-LogFileOnly -Message ("Flags: Repartition={0} Redownload={1} Reapply={2}" -f $ForceRepartition, [bool]$ForceRedownload, [bool]$ForceApplyImage) -Level 'INFO'
     Write-LogFileOnly -Message $diskLine -Level 'INFO'
+    Write-LogFileOnly -Message ("StepSelection={0}" -f (Get-StepSelectionLabel)) -Level 'INFO'
+}
+function Convert-StepIdToNumber {
+    param([Parameter(Mandatory)][string]$StepId)
+
+    # Decimal parse supports "9.5" etc. (Invariant culture avoids locale commas)
+    try {
+        return [decimal]::Parse($StepId, [System.Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        return $null
+    }
+}
+
+function Should-RunStep {
+    param([Parameter(Mandatory)][string]$Number)
+
+    # OnlyStep overrides everything
+    if (-not [string]::IsNullOrWhiteSpace($OnlyStep)) {
+        return ($Number -eq $OnlyStep)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($FromStep)) {
+        $n = Convert-StepIdToNumber -StepId $Number
+        $f = Convert-StepIdToNumber -StepId $FromStep
+
+        # If either fails to parse, be conservative: run the step
+        if ($n -ne $null -and $f -ne $null) {
+            if ($n -lt $f) { return $false }
+        }
+    }
+
+    return $true
+}
+
+function Get-StepSelectionLabel {
+    if (-not [string]::IsNullOrWhiteSpace($OnlyStep)) { return ("OnlyStep={0}" -f $OnlyStep) }
+    if (-not [string]::IsNullOrWhiteSpace($FromStep)) { return ("FromStep={0}" -f $FromStep) }
+    return "AllSteps"
 }
 
 function Invoke-Step {
@@ -199,7 +258,15 @@ function Invoke-Step {
         [Parameter(Mandatory)][scriptblock]$Action
     )
 
-    Write-StepBanner -Number $Number -Name $Name
+    
+Write-StepBanner -Number $Number -Name $Name
+
+    # NEW: FromStep / OnlyStep logic
+    if (-not (Should-RunStep -Number $Number)) {
+        Write-Log ("Skipped (step selection): Step {0} not in requested range." -f $Number) 'OK'
+        return
+    }
+
 
     try {
         & $Action
