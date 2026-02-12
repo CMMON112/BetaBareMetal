@@ -1895,7 +1895,7 @@ Invoke-Step "22" "Cleanup temporary files and restart computer" {
     Write-Log "Persistent log confirmed at Windows volume." 'OK'
     Write-Log "Beginning final cleanup and system restart." 'INFO'
 
-    Cleanup-And-Restart
+    #Cleanup-And-Restart
 
     # No further output expected after this point
 }
