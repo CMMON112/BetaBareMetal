@@ -75,13 +75,14 @@ function Ensure-LocalVar {
 
     $v = Get-Variable -Name $Name -Scope Local -ErrorAction SilentlyContinue
 
+    # Variable does not exist
     if (-not $v) {
         Set-Variable -Name $Name -Scope Local -Value $DefaultValue -Force
         return
     }
 
-    # If it exists but is empty string, overwrite with default
-    if ($v.Value -is [string] -and [string]::IsNullOrWhiteSpace([string]$v.Value)) {
+    # Variable exists but is empty string → overwrite
+    if ($v.Value -is [string] -and [string]::IsNullOrWhiteSpace($v.Value)) {
         Set-Variable -Name $Name -Scope Local -Value $DefaultValue -Force
     }
 }
