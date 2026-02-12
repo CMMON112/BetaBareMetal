@@ -991,56 +991,41 @@ function Find-HPDriverPackBestMatch {
     # Only HP
     $mfg = Norm $Hardware.CSManufacturer
     if (-not ($mfg -match 'HP|HEWLETT')) {
-        return [pscustomobject]@{ Matched=$false; Reason="Not HP"; Candidates=@() }
+        return [pscustomobject]@{ Matched=$false; Reason='Not HP'; Candidates=@() }
     }
 
-    # SystemId must match BBProduct (your "8b41" case)
     $bbProduct = Norm $Hardware.BBProduct
     if ([string]::IsNullOrWhiteSpace($bbProduct)) {
-        return [pscustomobject]@{ Matched=$false; Reason="BBProduct is empty; cannot match SystemId"; Candidates=@() }
+        return [pscustomobject]@{ Matched=$false; Reason='BBProduct missing'; Candidates=@() }
     }
 
-    # OS preference list (ReleaseId first, then descend)
-    $preferred = New-Object System.Collections.Generic.List[string]
-    $preferred.Add($ReleaseId.ToUpperInvariant()) | Out-Null
-
-    foreach ($x in @('26H2','25H2','24H2','23H2','22H2','21H2')) {
-        if ($preferred -notcontains $x) { $preferred.Add($x) | Out-Null }
-    }
+    # OS preference order
+    $preferred = @($ReleaseId.ToUpperInvariant(),'26H2','25H2','24H2','23H2','22H2')
 
     function Get-OsRank([string]$osName) {
         if ([string]::IsNullOrWhiteSpace($osName)) { return 0 }
-        $u = $osName.ToUpperInvariant()
 
-        # Hard gate: Windows 11 only
+        $u = $osName.ToUpperInvariant()
         if ($u -notmatch 'WINDOWS 11') { return 0 }
         if ($u -match 'WINDOWS 10')    { return 0 }
 
-        # Prefer 64-bit (optional – your environment is x64)
-        $score = 10
-        if ($u -match '64-BIT') { $score += 5 }
+        $base = 100
+        if ($u -match '64-BIT') { $base += 10 }
 
-        # Highest preference = first hit in preferred list
-        $i = 0
-        foreach ($p in $preferred) {
-            if ($u -match [regex]::Escape($p)) {
-                # earlier in list => larger score
-                return $score + (1000 - ($i * 50))
+        for ($i=0; $i -lt $preferred.Count; $i++) {
+            if ($u -match [regex]::Escape($preferred[$i])) {
+                return $base + (1000 - ($i * 50))
             }
-            $i++
         }
 
-        # Win11 but no known H2 token
-        return $score + 100
+        return $base + 100
     }
 
-    # Filter rows: exact SystemId match + Win11 only
     $candidates = @()
     foreach ($row in $HpCatalog.DriverPackMap) {
-        $sid = Norm $row.SystemId
-        if ($sid -ne $bbProduct) { continue }
+        if (Norm $row.SystemId -ne $bbProduct) { continue }
 
-        $rank = Get-OsRank -osName $row.OSName
+        $rank = Get-OsRank $row.OSName
         if ($rank -le 0) { continue }
 
         $candidates += [pscustomobject]@{
@@ -1049,18 +1034,18 @@ function Find-HPDriverPackBestMatch {
         }
     }
 
-    if (-not $candidates -or $candidates.Count -eq 0) {
+    if ($candidates.Count -eq 0) {
         return [pscustomobject]@{
             Matched=$false
-            Reason=("No Windows 11 driver pack rows for SystemId '{0}'" -f $bbProduct)
+            Reason=("No Windows 11 driver packs for SystemId '{0}'" -f $bbProduct)
             Candidates=@()
         }
     }
 
-    # Sort best OS rank, then newest SoftPaq DateReleased (if known)
-    $best = $null
-    $bestRank = -1
-    $bestDate = [datetime]::MinValue
+    # Select best candidate + SoftPaq
+    $best      = $null
+    $bestRank  = -1
+    $bestDate  = [datetime]::MinValue
 
     foreach ($c in ($candidates | Sort-Object Rank -Descending)) {
         $spid = [string]$c.Row.SoftPaqId
@@ -1070,8 +1055,6 @@ function Find-HPDriverPackBestMatch {
         if (-not $HpCatalog.SoftPaqById.ContainsKey($key)) { continue }
 
         $sp = $HpCatalog.SoftPaqById[$key]
-
-        # Need URL + SHA256 for your workflow
         if ([string]::IsNullOrWhiteSpace($sp.Url))    { continue }
         if ([string]::IsNullOrWhiteSpace($sp.Sha256)) { continue }
 
@@ -1079,7 +1062,7 @@ function Find-HPDriverPackBestMatch {
         if (-not $dt) { $dt = [datetime]::MinValue }
 
         if ($c.Rank -gt $bestRank -or ($c.Rank -eq $bestRank -and $dt -gt $bestDate)) {
-            $best = [pscustomobject]@{ Candidate=$c; SoftPaq=$sp }
+            $best     = [pscustomobject]@{ Candidate=$c; SoftPaq=$sp }
             $bestRank = $c.Rank
             $bestDate = $dt
         }
@@ -1088,22 +1071,23 @@ function Find-HPDriverPackBestMatch {
     if (-not $best) {
         return [pscustomobject]@{
             Matched=$false
-            Reason="Found matching Win11 rows, but no SoftPaq had both Url and SHA256"
-            Candidates=($candidates | Select-Object -First 10)
+            Reason='Matching Win11 rows found, but none had Url + SHA256'
+            Candidates=($candidates | Select-Object -First 5)
         }
     }
 
-return [pscustomobject]@{
-    Matched      = $true
-    Score        = $top.Score
-    MatchInfo    = $top.Matched
-    DriverPackUrl= $top.Url
-    SoftPaqId    = $top.Item.SoftPaqId
-    Name         = $top.Item.Name
-    Version      = $top.Item.Version
-    DateReleased = $top.Item.DateReleased
-    SystemIds    = $top.Item.SystemIds
-}
+    return [pscustomobject]@{
+        Matched      = $true
+        SystemId     = $bbProduct
+        OSName       = $best.Candidate.Row.OSName
+        SoftPaqId    = $best.SoftPaq.Id
+        Url          = $best.SoftPaq.Url
+        Sha256       = $best.SoftPaq.Sha256
+        Name         = $best.SoftPaq.Name
+        Version      = $best.SoftPaq.Version
+        DateReleased = $best.SoftPaq.DateReleased
+        Rank         = $bestRank
+    }
 }
 
 function Inject-DriversOfflineWindows {
