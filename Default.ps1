@@ -1676,7 +1676,7 @@ Invoke-Step "7" "HP DriverPack match via HPClientDriverPackCatalog.cab" {
     $hpItems = Import-HPClientDriverPackCatalog -XmlPath $xmlPath
 
     Write-Log "Selecting best HP DriverPack match for Win11 (24H2+)..." 'INFO'
-    $match = Find-HPDriverPackBestMatch -Hardware $script:Hardware -HpItems $hpItems -ReleaseId $ReleaseId
+    $match = Find-HPDriverPackBestMatch -Hardware $script:Hardware -HpCatalogItems $hpItems -ReleaseId $ReleaseId
 
     if (-not $match.Matched) {
         Write-Log ("HP DriverPack match failed: {0}" -f $match.Reason) 'WARN'
