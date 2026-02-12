@@ -30,6 +30,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
+
 # StrictMode-safe script-scope initialization
 $script:BuildForgeRoot = $null
 $script:Hardware       = $null
@@ -48,6 +49,10 @@ $script:ImageIndexes    = $null
 $script:SelectedIndex   = $null
 
 $script:BuildForgeRootHistory = New-Object System.Collections.Generic.List[string]
+
+# Track current step name for consistent log tagging
+$script:CurrentStepName = $null
+
 # ---------------------------
 # Fixed logging location (never moves)
 # ---------------------------
@@ -63,13 +68,41 @@ function Initialize-Logging {
     }
 }
 
+function Format-LogMessage {
+    param(
+        [AllowEmptyString()]
+        [string] $Message
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) { return $Message }
+
+    # Messaging-only normalization:
+    # - remove shorthand arrows in output for non-technical audiences
+    # - keep technical detail intact (paths, URLs, parameters)
+    $m = $Message
+
+    # Convert common arrow shorthands to plain wording
+    $m = $m -replace '\s*-\>\s*', ' to '
+    $m = $m -replace '\s*=\>\s*', ' to '
+
+    # Collapse repeated whitespace (safe for readability)
+    $m = $m -replace '\s{2,}', ' '
+
+    return $m.Trim()
+}
+
 function Write-Log {
     param(
         [AllowEmptyString()]
         [string] $Message,
 
         [ValidateSet('INFO','WARN','ERROR','OK','STEP')]
-        [string] $Level = 'INFO'
+        [string] $Level = 'INFO',
+
+        # Optional structured metadata for clearer output
+        [string] $StepName,
+        [string] $Context,
+        [string] $Detail
     )
 
     # Skip empty/whitespace messages safely
@@ -77,8 +110,21 @@ function Write-Log {
 
     Initialize-Logging
 
+    # Auto-tag with current step if not provided
+    if ([string]::IsNullOrWhiteSpace($StepName) -and $script:CurrentStepName) {
+        $StepName = $script:CurrentStepName
+    }
+
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    $line = "$ts [$Level] $Message"
+
+    $stepTag = if ([string]::IsNullOrWhiteSpace($StepName)) { '' } else { " [STEP:$StepName]" }
+    $ctxTag  = if ([string]::IsNullOrWhiteSpace($Context)) { '' } else { " Context: $Context." }
+    $detTag  = if ([string]::IsNullOrWhiteSpace($Detail))  { '' } else { " Detail: $Detail" }
+
+    $msg = Format-LogMessage -Message $Message
+
+    # Final line content (screen + file)
+    $line = "$ts [$Level]$stepTag $msg$ctxTag$detTag"
 
     $color = switch ($Level) {
         'STEP'  { 'Cyan' }
@@ -88,7 +134,7 @@ function Write-Log {
         default { 'Gray' }
     }
 
-    Write-Host "[$Level] $Message" -ForegroundColor $color
+    Write-Host $line -ForegroundColor $color
     [System.IO.File]::AppendAllText($script:LogFile, $line + "`r`n")
 }
 
@@ -97,14 +143,22 @@ function Invoke-Step {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][scriptblock]$Action
     )
-    Write-Log "==================== $Name ====================" 'STEP'
+
+    $script:CurrentStepName = $Name
+
+    Write-Log "Starting step." 'STEP' -Context "Execution" -Detail "Entering step block"
     try {
         & $Action
-        Write-Log "$Name - complete" 'OK'
+        Write-Log "Step completed successfully." 'OK' -Context "Execution" -Detail "No errors reported"
     } catch {
-        Write-Log "$Name - FAILED: $($_.Exception.Message)" 'ERROR'
-        Write-Log $_.ScriptStackTrace 'ERROR'
+        Write-Log "Step failed." 'ERROR' -Context "Execution" -Detail $_.Exception.Message
+        if ($_.ScriptStackTrace) {
+            Write-Log "Stack trace follows." 'ERROR' -Context "Execution"
+            Write-Log $_.ScriptStackTrace 'ERROR' -Context "Execution"
+        }
         throw
+    } finally {
+        $script:CurrentStepName = $null
     }
 }
 
@@ -159,7 +213,7 @@ function Update-BuildForgeRoot {
     }
     if ($script:BuildForgeRoot -ne $newRoot) {
         $script:BuildForgeRootHistory.Add($script:BuildForgeRoot) | Out-Null
-        Write-Log "BuildForgeRoot relocating: '$($script:BuildForgeRoot)' -> '$newRoot'" 'INFO'
+        Write-Log "BuildForgeRoot relocating: '$($script:BuildForgeRoot)' -> '$newRoot'" 'INFO' -Context "Storage" -Detail "Workspace folder location changed"
         Move-BuildForgeContents -Source $script:BuildForgeRoot -Destination $newRoot
         $script:BuildForgeRoot = $newRoot
         Ensure-Dir $script:BuildForgeRoot
@@ -187,7 +241,7 @@ function Invoke-Native {
         [string[]]$Arguments = @(),
         [switch]$IgnoreExitCode
     )
-    Write-Log "Running: $FilePath $($Arguments -join ' ')" 'INFO'
+    Write-Log "Running native command." 'INFO' -Context "Process" -Detail "$FilePath $($Arguments -join ' ')"
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = $FilePath
@@ -206,15 +260,15 @@ function Invoke-Native {
     $p.WaitForExit()
 
     if ($stdout) {
-    $stdout -split "`r?`n" |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        ForEach-Object { Write-Log $_ 'INFO' }
+        $stdout -split "`r?`n" |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { Write-Log $_ 'INFO' -Context "ProcessOutput" }
     }
 
     if ($stderr) {
-    $stderr -split "`r?`n" |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        ForEach-Object { Write-Log $_ 'WARN' }
+        $stderr -split "`r?`n" |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { Write-Log $_ 'WARN' -Context "ProcessError" }
     }
 
     if (-not $IgnoreExitCode -and $p.ExitCode -ne 0) {
@@ -232,19 +286,19 @@ function Invoke-Download {
     Ensure-Dir (Split-Path -Parent $DestPath)
 
     if ((Test-Path -LiteralPath $DestPath) -and -not $ForceRedownload) {
-        Write-Log "Already exists, skipping download: $DestPath" 'INFO'
+        Write-Log "Download skipped because the file already exists." 'INFO' -Context "Download" -Detail $DestPath
         return $DestPath
     }
 
     $curl = Resolve-CurlPath
-    Write-Log "Downloading: $Url" 'INFO'
+    Write-Log "Downloading file from URL." 'INFO' -Context "Download" -Detail $Url
     & $curl --fail --location --silent --show-error --retry 2 --retry-delay 3 --connect-timeout 30 --output $DestPath $Url
     if ($LASTEXITCODE -ne 0) { throw "curl failed ($LASTEXITCODE) for $Url" }
 
     if (-not (Test-Path -LiteralPath $DestPath)) {
         throw "Download reported success but file missing: $DestPath"
     }
-    Write-Log "Download complete: $DestPath" 'OK'
+    Write-Log "Download completed successfully." 'OK' -Context "Download" -Detail $DestPath
     return $DestPath
 }
 
@@ -258,13 +312,13 @@ function Confirm-FileHash {
         $a = (Get-FileHash -Algorithm SHA1 -Path $FilePath).Hash.ToLowerInvariant()
         $e = $ExpectedSha1.ToLowerInvariant().Trim()
         if ($a -ne $e) { throw "SHA1 mismatch. Expected=$e Got=$a" }
-        Write-Log "SHA1 verified." 'OK'
+        Write-Log "File hash verified using SHA1." 'OK' -Context "Integrity" -Detail $FilePath
     }
     if ($ExpectedSha256) {
         $a = (Get-FileHash -Algorithm SHA256 -Path $FilePath).Hash.ToLowerInvariant()
         $e = $ExpectedSha256.ToLowerInvariant().Trim()
         if ($a -ne $e) { throw "SHA256 mismatch. Expected=$e Got=$a" }
-        Write-Log "SHA256 verified." 'OK'
+        Write-Log "File hash verified using SHA256." 'OK' -Context "Integrity" -Detail $FilePath
     }
 }
 
@@ -291,7 +345,7 @@ function Get-Catalog {
     $local = Join-Path $catalogDir $leaf
 
     Invoke-Download -Url $CatalogUrl -DestPath $local | Out-Null
-    Write-Log "Importing catalog (CLIXML): $local" 'INFO'
+    Write-Log "Importing catalog file in CLIXML format." 'INFO' -Context "Catalog" -Detail $local
     return Import-Clixml -Path $local
 }
 
@@ -527,7 +581,6 @@ function Get-ImageIndexesFromEsd {
     return $list
 }
 
-
 function Get-OffineWindowsOsGuid {
     param(
         [Parameter(Mandatory)]
@@ -565,21 +618,18 @@ function Get-OfflineOsGuidFromBcd {
         throw "BCD store not found at '$BcdStorePath'. Is the EFI partition mounted as S:?"
     }
 
-    # Helper: true GUID identifier like {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
     function Is-GuidIdentifier([string]$id) {
         return ($id -match '^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$')
     }
 
-    # Enumerate BCD with verbose output so we can match device/path
     $out = & bcdedit.exe /enum all /v /store $BcdStorePath 2>&1
     if (-not $out) { throw "bcdedit returned no output for '$BcdStorePath'" }
 
     $candidates = New-Object System.Collections.Generic.List[string]
     $fallbackAliases = New-Object System.Collections.Generic.List[string]
 
-    # Parse blocks separated by blank lines
     $block = New-Object System.Collections.Generic.List[string]
-    foreach ($line in $out + '') {  # add sentinel blank line
+    foreach ($line in $out + '') {
         if (-not [string]::IsNullOrWhiteSpace($line)) {
             $block.Add($line) | Out-Null
             continue
@@ -588,7 +638,6 @@ function Get-OfflineOsGuidFromBcd {
         if ($block.Count -gt 0) {
             $text = ($block -join "`n")
 
-            # Look for Windows Boot Loader entry that targets W: and winload.efi
             if ($text -match '(?im)^\s*path\s+\\Windows\\System32\\winload\.efi\s*$' -and
                 $text -match "(?im)^\s*device\s+partition=$([regex]::Escape($WindowsPartition))\s*$") {
 
@@ -601,7 +650,6 @@ function Get-OfflineOsGuidFromBcd {
                     if (Is-GuidIdentifier $id) {
                         $candidates.Add($id) | Out-Null
                     } else {
-                        # Remember alias-y identifiers like {default}/{current}
                         $fallbackAliases.Add($id) | Out-Null
                     }
                 }
@@ -611,12 +659,10 @@ function Get-OfflineOsGuidFromBcd {
         }
     }
 
-    # 1) Prefer a real GUID candidate
     if ($candidates.Count -gt 0) {
         return $candidates[0]
     }
 
-    # 2) If we only found {default}/{current}, resolve bootmgr's "default" value
     $bm = & bcdedit.exe /enum '{bootmgr}' /v /store $BcdStorePath 2>&1
     if ($bm -and ($bm -match '(?im)^\s*default\s+(\{.+?\})\s*$')) {
         $defaultId = $Matches[1].Trim()
@@ -625,11 +671,9 @@ function Get-OfflineOsGuidFromBcd {
         }
     }
 
-    # 3) If still no GUID, fail with actionable detail
     $aliases = if ($fallbackAliases.Count -gt 0) { ($fallbackAliases | Select-Object -Unique) -join ', ' } else { '(none)' }
     throw "Could not resolve a GUID OS loader identifier for $WindowsPartition. Found only aliases: $aliases. reagentc requires a GUID identifier (not {default}/{current})."
 }
-
 
 function Select-DesiredIndex {
     [CmdletBinding()]
@@ -642,27 +686,23 @@ function Select-DesiredIndex {
         throw "Select-DesiredIndex: No indexes were provided."
     }
 
-    # Filter out " N" editions defensively (in case caller didn't)
     $clean = $Indexes | Where-Object { $_.Name -and $_.Name -notmatch '(?i)\sN$' }
 
     if (-not $clean -or $clean.Count -eq 0) {
         throw "Select-DesiredIndex: All discovered images were N editions (or had no Name)."
     }
 
-    # Exact target names (non-N only)
     $desired = switch ($SKU) {
         'Enterprise'   { 'Windows 11 Enterprise' }
         'Professional' { 'Windows 11 Pro' }
         default        { throw "Select-DesiredIndex: Unsupported SKU '$SKU'." }
     }
 
-    # 1) Prefer exact match (case-insensitive)
     $exact = $clean | Where-Object {
         $_.Name.Equals($desired, [System.StringComparison]::OrdinalIgnoreCase)
     } | Select-Object -First 1
     if ($exact) { return [int]$exact.Index }
 
-    # 2) Fallback for Pro: some media calls it "Windows 11 Professional"
     if ($SKU -eq 'Professional') {
         $alt = $clean | Where-Object {
             $_.Name.Equals('Windows 11 Professional', [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -671,13 +711,11 @@ function Select-DesiredIndex {
         if ($alt) { return [int]$alt.Index }
     }
 
-    # 3) Fallback: "starts with" desired (still excludes N due to $clean)
     $starts = $clean | Where-Object {
         $_.Name.StartsWith($desired, [System.StringComparison]::OrdinalIgnoreCase)
     } | Select-Object -First 1
     if ($starts) { return [int]$starts.Index }
 
-    # 4) Last resort: contain token (Enterprise / Pro) but still non-N
     $token = if ($SKU -eq 'Enterprise') { 'Enterprise' } else { 'Pro' }
     $contains = $clean | Where-Object {
         $_.Name -match "(?i)\b$token\b"
@@ -687,7 +725,6 @@ function Select-DesiredIndex {
     $names = ($clean | ForEach-Object { "Index=$($_.Index) Name=$($_.Name)" }) -join "; "
     throw "Could not find a suitable NON-N index for SKU='$SKU'. Available (non-N): $names"
 }
-
 
 # ---------------------------
 # HP SoftPaq extractor + wait-for-child-procs
@@ -752,42 +789,38 @@ function Expand-HPSoftPaq {
     Ensure-Dir $Destination
     $exeAbs = (Resolve-Path -LiteralPath $SoftPaqExe).Path
 
-    Write-Log "Extracting HP SoftPaq -> $Destination" 'INFO'
-    Write-Log "SoftPaq EXE resolved path: $exeAbs" 'INFO'
+    Write-Log "Extracting HP SoftPaq package." 'INFO' -Context "Drivers" -Detail "Destination: $Destination"
+    Write-Log "SoftPaq executable resolved path." 'INFO' -Context "Drivers" -Detail $exeAbs
 
-    # --- Try modern syntax first: /s /e /f <target-path> ---
-    # Many HP driver packs use this style (your sp160195.exe literally prints it).
     $argsModern = @('/s','/e','/f', $Destination)
     try {
-        Write-Log "Trying SoftPaq modern switches: $($argsModern -join ' ')" 'INFO'
+        Write-Log "Attempting extraction using modern SoftPaq switches." 'INFO' -Context "Drivers" -Detail ($argsModern -join ' ')
         $p = Start-Process -FilePath $exeAbs -ArgumentList $argsModern -PassThru -WindowStyle Hidden
         Wait-ProcessTree -RootPid $p.Id
     } catch {
-        Write-Log "Modern switch extraction threw: $($_.Exception.Message)" 'WARN'
+        Write-Log "Modern switch extraction raised an exception." 'WARN' -Context "Drivers" -Detail $_.Exception.Message
     }
 
-    # If modern worked, we should see INF files somewhere under Destination
     $infCount = (Get-ChildItem -LiteralPath $Destination -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
-    Write-Log "INF files after modern extraction attempt: $infCount" 'INFO'
+    Write-Log "INF file count after modern extraction attempt." 'INFO' -Context "Drivers" -Detail $infCount
     if ($infCount -gt 0) {
-        Write-Log "SoftPaq extraction complete (modern): $Destination" 'OK'
+        Write-Log "SoftPaq extraction completed using modern switches." 'OK' -Context "Drivers" -Detail $Destination
         return
     }
 
-    # --- Fallback legacy syntax: -pdf -f<path> -s (older SoftPaqs) ---
     $argsLegacy = @('-pdf', "-f$Destination", '-s')
-    Write-Log "Falling back to legacy switches: $($argsLegacy -join ' ')" 'WARN'
+    Write-Log "Falling back to legacy SoftPaq switches." 'WARN' -Context "Drivers" -Detail ($argsLegacy -join ' ')
 
     $p2 = Start-Process -FilePath $exeAbs -ArgumentList $argsLegacy -PassThru -WindowStyle Hidden
     Wait-ProcessTree -RootPid $p2.Id
 
     $infCount2 = (Get-ChildItem -LiteralPath $Destination -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
-    Write-Log "INF files after legacy extraction attempt: $infCount2" 'INFO'
+    Write-Log "INF file count after legacy extraction attempt." 'INFO' -Context "Drivers" -Detail $infCount2
 
     if ($infCount2 -eq 0) {
-        Write-Log "SoftPaq extraction produced no INF files in $Destination. Content may be nested or extracted elsewhere (SWSetup/Temp)." 'WARN'
+        Write-Log "SoftPaq extraction completed but no INF files were found under the destination folder. Content may be nested or extracted elsewhere." 'WARN' -Context "Drivers" -Detail $Destination
     } else {
-        Write-Log "SoftPaq extraction complete (legacy): $Destination" 'OK'
+        Write-Log "SoftPaq extraction completed using legacy switches." 'OK' -Context "Drivers" -Detail $Destination
     }
 }
 
@@ -802,10 +835,8 @@ function Resolve-ArtifactPath {
 
     $leaf = [IO.Path]::GetFileName($Path)
 
-    # Common places we may have moved it to
     $candidates = @()
 
-    # Current BuildForge root
     if (Get-Variable -Name BuildForgeRoot -Scope Script -ErrorAction SilentlyContinue) {
         if ($script:BuildForgeRoot) {
             $candidates += @(
@@ -816,7 +847,6 @@ function Resolve-ArtifactPath {
         }
     }
 
-    # Known previous roots (optional; if you add history tracking later)
     if (Get-Variable -Name BuildForgeRootHistory -Scope Script -ErrorAction SilentlyContinue) {
         foreach ($r in $script:BuildForgeRootHistory) {
             if ($r) {
@@ -865,26 +895,26 @@ function Get-ProcessTreePids {
 Invoke-Step "  1) Setup BuildForge root + fixed logging" {
     Initialize-Logging
     Update-BuildForgeRoot
-    Write-Log "Fixed Log:  $script:LogFile" 'INFO'
-    Write-Log "Root Dir:   $script:BuildForgeRoot" 'INFO'
+    Write-Log "Fixed log file location." 'INFO' -Context "Logging" -Detail $script:LogFile
+    Write-Log "Current working root directory." 'INFO' -Context "Storage" -Detail $script:BuildForgeRoot
 }
 
 Invoke-Step "  2) List PowerShell + environment info" {
     $osCap = 'Unknown / WinRE'
     try { $osCap = (Get-CimInstance Win32_OperatingSystem).Caption } catch {}
-    Write-Log "PowerShell: $($PSVersionTable.PSVersion)" 'INFO'
-    Write-Log "OS:         $osCap" 'INFO'
+    Write-Log "PowerShell version detected." 'INFO' -Context "Environment" -Detail $($PSVersionTable.PSVersion)
+    Write-Log "Operating system caption detected." 'INFO' -Context "Environment" -Detail $osCap
 }
 
 Invoke-Step "  3) List hardware identity" {
     $hw = Get-HardwareIdentity
     $script:Hardware = $hw
-    Write-Log ("CS: {0} {1}" -f $hw.CSManufacturer, $hw.CSModel) 'INFO'
-    Write-Log ("BB: {0} {1} SKU={2} Prod={3}" -f $hw.BBManufacturer, $hw.BBModel, $hw.BBSKU, $hw.BBProduct) 'INFO'
+    Write-Log ("Computer system identity." -f $null) 'INFO' -Context "Hardware" -Detail ("{0} {1}" -f $hw.CSManufacturer, $hw.CSModel)
+    Write-Log ("Baseboard identity." -f $null) 'INFO' -Context "Hardware" -Detail ("{0} {1} SKU={2} Product={3}" -f $hw.BBManufacturer, $hw.BBModel, $hw.BBSKU, $hw.BBProduct)
 }
 
 Invoke-Step "  4) List target OS parameters" {
-    Write-Log "OS=$OperatingSystem ReleaseId=$ReleaseId Arch=$Architecture Lang=$LanguageCode License=$License SKU=$SKU" 'INFO'
+    Write-Log "Target operating system parameters." 'INFO' -Context "Configuration" -Detail "OS=$OperatingSystem ReleaseId=$ReleaseId Arch=$Architecture Lang=$LanguageCode License=$License SKU=$SKU"
 }
 
 Invoke-Step "  5) Download catalogs" {
@@ -906,7 +936,7 @@ Invoke-Step "  6) Match OS entry from catalog" {
     $script:OsSha1   = $osSha1
     $script:OsSha256 = $osSha256
 
-    Write-Log "Selected OS URL: $osUrl" 'OK'
+    Write-Log "Operating system image selected from catalog." 'OK' -Context "OS Catalog" -Detail $osUrl
 }
 
 Invoke-Step "  7) Match driver pack from hardware + catalog" {
@@ -914,17 +944,17 @@ Invoke-Step "  7) Match driver pack from hardware + catalog" {
     $script:DriverMatch = $res
 
     if ($res.Matched) {
-        Write-Log "Driver match: Score=$($res.Score) Fields=$($res.MatchInfo)" 'OK'
-        Write-Log "Driver URL: $($res.URL)" 'INFO'
+        Write-Log "Driver pack match found for current hardware." 'OK' -Context "Drivers" -Detail "Score=$($res.Score) MatchedFields=$($res.MatchInfo)"
+        Write-Log "Selected driver pack download URL." 'INFO' -Context "Drivers" -Detail $res.URL
     } else {
-        Write-Log "No single driver match: $($res.Reason)" 'WARN'
+        Write-Log "No suitable driver pack match met the minimum score. Driver download will be skipped." 'WARN' -Context "Drivers" -Detail $res.Reason
     }
 }
 
 Invoke-Step "  8) Select best local disk for OS" {
     $disk = Get-TargetDisk
     $script:TargetDisk = $disk
-    Write-Log ("Disk #{0} BusType={1} Size={2:N2}GB Boot={3} System={4}" -f $disk.Number, $disk.BusType, ($disk.Size/1GB), $disk.IsBoot, $disk.IsSystem) 'OK'
+    Write-Log "Target disk selected for installation." 'OK' -Context "Disk" -Detail ("Disk #{0} BusType={1} Size={2:N2}GB Boot={3} System={4}" -f $disk.Number, $disk.BusType, ($disk.Size/1GB), $disk.IsBoot, $disk.IsSystem)
 }
 
 Invoke-Step "  9) Partition disk (UEFI/GPT) if needed" {
@@ -933,17 +963,17 @@ Invoke-Step "  9) Partition disk (UEFI/GPT) if needed" {
     $haveR = Test-Path -LiteralPath 'R:\'
 
     if ($ForceRepartition -or -not ($haveW -and $haveS -and $haveR)) {
-        Write-Log "Partitioning required (ForceRepartition=$ForceRepartition, S=$haveS W=$haveW R=$haveR)" 'WARN'
+        Write-Log "Disk partitioning is required for the expected layout." 'WARN' -Context "Disk" -Detail "ForceRepartition=$ForceRepartition, S=$haveS W=$haveW R=$haveR"
         Apply-UEFIPartitionLayout -DiskNumber $script:TargetDisk.Number
-        Write-Log "Partition layout applied. Expect S:, W:, R:" 'OK'
+        Write-Log "Disk partition layout applied. Expected drive letters are now available." 'OK' -Context "Disk" -Detail "S: (EFI), W: (Windows), R: (Recovery)"
     } else {
-        Write-Log "Partitions already present (S:,W:,R:). Skipping repartition." 'INFO'
+        Write-Log "Expected partitions already present. Disk repartitioning skipped." 'INFO' -Context "Disk" -Detail "S:, W:, and R: are available"
     }
 }
 
 Invoke-Step " 10) Move BuildForge root to W: (when W: exists)" {
     Update-BuildForgeRoot
-    Write-Log "Current Root Dir: $script:BuildForgeRoot" 'INFO'
+    Write-Log "Current working root directory confirmed." 'INFO' -Context "Storage" -Detail $script:BuildForgeRoot
 }
 
 Invoke-Step " 11) Download correct OS ESD/WIM (best match)" {
@@ -958,7 +988,7 @@ Invoke-Step " 11) Download correct OS ESD/WIM (best match)" {
     if ($script:OsSha1 -or $script:OsSha256) {
         Confirm-FileHash -FilePath $osPath -ExpectedSha1 $script:OsSha1 -ExpectedSha256 $script:OsSha256
     } else {
-        Write-Log "No hashes provided by catalog; skipping hash verification." 'WARN'
+        Write-Log "Integrity check skipped because the catalog did not provide file hashes." 'WARN' -Context "Integrity" -Detail $osPath
     }
 
     $script:OsPath = $osPath
@@ -967,7 +997,7 @@ Invoke-Step " 11) Download correct OS ESD/WIM (best match)" {
 Invoke-Step " 12) Download best-match driver pack (if match) (no extract yet)" {
     Update-BuildForgeRoot
     if (-not ($script:DriverMatch.Matched -and $script:DriverMatch.URL)) {
-        Write-Log "No driver URL matched; skipping download." 'WARN'
+        Write-Log "Driver pack download skipped because no matching driver URL was available." 'WARN' -Context "Drivers"
         return
     }
     $drvDir = Join-Path $script:BuildForgeRoot 'Drivers'
@@ -983,12 +1013,11 @@ Invoke-Step " 12) Download best-match driver pack (if match) (no extract yet)" {
 }
 
 Invoke-Step " 13) List ESD/WIM indexes (DISM)" {
-    # DISM /Get-ImageInfo lists images in WIM/ESD [1](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/take-inventory-of-an-image-or-component-using-dism?view=windows-11)
     $idx = Get-ImageIndexesFromEsd -ImageFile $script:OsPath
     $script:ImageIndexes = $idx
 
-    Write-Log "Images found in $($script:OsPath):" 'INFO'
-    $idx | ForEach-Object { Write-Log ("  Index {0}: {1}" -f $_.Index, $_.Name) 'INFO' }
+    Write-Log "Enumerating images within the OS installation file." 'INFO' -Context "Image" -Detail $script:OsPath
+    $idx | ForEach-Object { Write-Log ("Image index discovered. Index={0} Name={1}" -f $_.Index, $_.Name) 'INFO' -Context "Image" }
 
     if (-not $idx -or $idx.Count -eq 0) { throw "No indexes parsed from DISM output." }
 }
@@ -996,18 +1025,16 @@ Invoke-Step " 13) List ESD/WIM indexes (DISM)" {
 Invoke-Step " 14) Select desired index (Windows 11 $SKU)" {
     $index = Select-DesiredIndex -Indexes $script:ImageIndexes
     $script:SelectedIndex = $index
-    Write-Log "Selected index: $index (SKU=$SKU)" 'OK'
+    Write-Log "Selected image index for installation based on SKU preference." 'OK' -Context "Image" -Detail "Index=$index SKU=$SKU"
 }
 
 Invoke-Step " 15) Expand selected index to W:\" {
-
     $already = Test-Path -LiteralPath 'W:\Windows\System32'
     if ($already -and -not $ForceApplyImage) {
-        Write-Log "W:\Windows already present. Skipping Expand-image (use -ForceApplyImage to reapply)." 'INFO'
+        Write-Log "Windows folder already exists. Applying the image has been skipped. Use ForceApplyImage to reapply." 'INFO' -Context "Image" -Detail "W:\Windows\System32 detected"
         return
     }
 
-    # Ensure DISM PowerShell cmdlets are available (PowerShell-only, no dism.exe)
     if (-not (Get-Command -Name Expand-WindowsImage -ErrorAction SilentlyContinue)) {
         try {
             Import-Module Dism -ErrorAction Stop
@@ -1017,22 +1044,17 @@ Invoke-Step " 15) Expand selected index to W:\" {
     }
 
     if ($PSCmdlet.ShouldProcess("W:\", "Expand-WindowsImage (Index $($script:SelectedIndex))")) {
-
-        # Expand the selected index to W:\
         Expand-WindowsImage -ImagePath $script:OsPath `
                            -Index $script:SelectedIndex `
                            -ApplyPath 'W:\' `
                            -ErrorAction Stop | Out-Null
 
-        Write-Log "Windows image applied to W:\ (PowerShell Apply-WindowsImage)" 'OK'
+        Write-Log "Windows image applied successfully to the Windows partition." 'OK' -Context "Image" -Detail "ApplyPath=W:\ Index=$($script:SelectedIndex)"
     }
 }
 
 Invoke-Step " 16) Configure boot (BCDBoot UEFI)" {
-    # BCDBoot sets up boot files for an applied image
     if ($PSCmdlet.ShouldProcess("S:\", "BCDBoot UEFI from W:\Windows")) {
-
-        # Prefer full path (WinRE PATH can be odd)
         $bcdboot = Join-Path $env:WINDIR 'System32\bcdboot.exe'
         if (-not (Test-Path -LiteralPath $bcdboot)) { $bcdboot = "bcdboot.exe" }
 
@@ -1042,7 +1064,7 @@ Invoke-Step " 16) Configure boot (BCDBoot UEFI)" {
             "/f","UEFI"
         ) | Out-Null
 
-        Write-Log "Boot files created (UEFI)." 'OK'
+        Write-Log "Boot configuration files created successfully for UEFI." 'OK' -Context "Boot" -Detail "Source=W:\Windows Target=S: Firmware=UEFI"
     }
 }
 
@@ -1056,12 +1078,11 @@ Invoke-Step " 17) Setup WinRE WIM on recovery partition + register offline" {
 
     if (Test-Path -LiteralPath $src) {
         Copy-Item -LiteralPath $src -Destination $dst -Force
-        Write-Log "Copied Winre.wim -> $dst" 'OK'
+        Write-Log "WinRE image copied to the recovery partition." 'OK' -Context "Recovery" -Detail $dst
     } else {
         throw "Winre.wim not found at $src (some images store it differently)."
     }
 
-    # Use reagentc.exe from the OFFLINE OS (WinRE often doesn't include reagentc.exe)
     $reagentc = 'W:\Windows\System32\reagentc.exe'
     if (-not (Test-Path -LiteralPath $reagentc)) {
         throw "reagentc.exe not found at expected path: $reagentc"
@@ -1069,82 +1090,74 @@ Invoke-Step " 17) Setup WinRE WIM on recovery partition + register offline" {
 
     if ($PSCmdlet.ShouldProcess("W:\Windows", "Register and enable WinRE offline")) {
 
-        # 1) Point offline Windows at the WinRE image location
         Invoke-Native -FilePath $reagentc -Arguments @(
             "/setreimage",
             "/path", $reDir,
             "/target", "W:\Windows"
         ) | Out-Null
 
-            $osGuid = Get-OfflineOsGuidFromBcd -BcdStorePath 'S:\EFI\Microsoft\Boot\BCD' -WindowsPartition 'W:'
-            Write-Log "Resolved OS loader GUID for WinRE binding: $osGuid" 'INFO'
+        $osGuid = Get-OfflineOsGuidFromBcd -BcdStorePath 'S:\EFI\Microsoft\Boot\BCD' -WindowsPartition 'W:'
+        Write-Log "Resolved OS loader GUID for WinRE binding." 'INFO' -Context "Recovery" -Detail $osGuid
 
-        # 3) Enable WinRE bound to that OS GUID (do NOT use [default])
         Invoke-Native -FilePath $reagentc -Arguments @(
             "/enable",
             "/osguid", $osGuid
         ) | Out-Null
 
-        Write-Log "WinRE configured and enabled (osguid=$osGuid)." 'OK'
+        Write-Log "WinRE configured and enabled for the offline operating system." 'OK' -Context "Recovery" -Detail "OSGUID=$osGuid"
     }
 }
 
 Invoke-Step "18) Extract HP driver pack silently (wait for full process tree)" {
 
     if (-not $script:DriverPackPath) {
-        Write-Log "No driver pack downloaded; skipping extraction." 'WARN'
+        Write-Log "Driver extraction skipped because no driver pack was downloaded." 'WARN' -Context "Drivers"
         return
     }
 
-    # Ensure BuildForgeRoot is correct (may relocate X: -> W:\BuildForge -> W:\Windows\Temp\BuildForge)
     Update-BuildForgeRoot
 
-    # Extraction destination (stable)
     $extractDir = Join-Path $script:BuildForgeRoot 'ExtractedDrivers'
     Ensure-Dir $extractDir
 
-    # Resolve driver pack path (in case BuildForgeRoot moved after download)
     $script:DriverPackPath = Resolve-ArtifactPath -Path $script:DriverPackPath
 
     $ext = [IO.Path]::GetExtension($script:DriverPackPath).ToLowerInvariant()
-    Write-Log "Driver pack: $($script:DriverPackPath) (ext=$ext)" 'INFO'
-    Write-Log "Extraction dir: $extractDir" 'INFO'
+    Write-Log "Driver pack prepared for extraction." 'INFO' -Context "Drivers" -Detail "Path=$($script:DriverPackPath) Extension=$ext"
+    Write-Log "Driver extraction destination directory confirmed." 'INFO' -Context "Drivers" -Detail $extractDir
 
     switch ($ext) {
         '.exe' {
-            # HP SoftPaq extraction (your Expand-HPSoftPaq should try /s /e /f first)
             Expand-HPSoftPaq -SoftPaqExe $script:DriverPackPath -Destination $extractDir
         }
         '.zip' {
             Expand-Archive -LiteralPath $script:DriverPackPath -DestinationPath $extractDir -Force
-            Write-Log "Extracted ZIP -> $extractDir" 'OK'
+            Write-Log "ZIP driver pack extracted successfully." 'OK' -Context "Drivers" -Detail $extractDir
         }
         '.cab' {
             Invoke-Native -FilePath "expand.exe" -Arguments @("-F:*", $script:DriverPackPath, $extractDir) | Out-Null
-            Write-Log "Extracted CAB -> $extractDir" 'OK'
+            Write-Log "CAB driver pack extracted successfully." 'OK' -Context "Drivers" -Detail $extractDir
         }
         default {
             throw "Unknown driver pack extension '$ext' - cannot extract."
         }
     }
 
-    # Count INFs under extraction root
     $infCount = (Get-ChildItem -LiteralPath $extractDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
-    Write-Log "Total INF files under extraction root: $infCount" 'INFO'
+    Write-Log "INF files discovered under driver extraction root." 'INFO' -Context "Drivers" -Detail $infCount
 
     if ($infCount -eq 0) {
         throw "Extraction completed but produced 0 .INF files under '$extractDir'. Cannot inject drivers."
     }
 
-    # IMPORTANT: inject from the extraction root (not a deep leaf)
     $script:DriverExtractDir = $extractDir
-    Write-Log "DriverExtractDir set for injection: $script:DriverExtractDir" 'OK'
+    Write-Log "Driver extraction directory set for injection." 'OK' -Context "Drivers" -Detail $script:DriverExtractDir
 }
 
 Invoke-Step "19) Inject drivers into offline image (Add-WindowsDriver /Recurse)" {
 
     if (-not $script:DriverExtractDir) {
-        Write-Log "No extracted drivers directory; skipping injection." 'WARN'
+        Write-Log "Driver injection skipped because no extracted driver directory is available." 'WARN' -Context "Drivers"
         return
     }
 
@@ -1153,29 +1166,27 @@ Invoke-Step "19) Inject drivers into offline image (Add-WindowsDriver /Recurse)"
     }
 
     $infCount = (Get-ChildItem -LiteralPath $script:DriverExtractDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
-    Write-Log "INF files available for injection: $infCount (root=$($script:DriverExtractDir))" 'INFO'
+    Write-Log "INF files available for injection." 'INFO' -Context "Drivers" -Detail "Count=$infCount Root=$($script:DriverExtractDir)"
     if ($infCount -eq 0) {
         throw "No .INF files found under '$($script:DriverExtractDir)'. Cannot inject drivers."
     }
 
     if ($PSCmdlet.ShouldProcess("W:\", "Add-WindowsDriver -Recurse from $($script:DriverExtractDir)")) {
 
-        # Add-WindowsDriver adds drivers to an offline image; -Recurse walks subfolders [1](https://learn.microsoft.com/en-us/powershell/module/dism/add-windowsdriver?view=windowsserver2025-ps)
         Add-WindowsDriver -Path 'W:\' `
                           -Driver $script:DriverExtractDir `
                           -Recurse `
                           -ErrorAction Stop | Out-Null
-                          # -ForceUnsigned  # uncomment only if you intentionally allow unsigned drivers
 
-        Write-Log "Driver injection complete (Add-WindowsDriver)." 'OK'
+        Write-Log "Driver injection completed successfully." 'OK' -Context "Drivers" -Detail "OfflinePath=W:\ DriverRoot=$($script:DriverExtractDir)"
     }
 }
 
 Invoke-Step "Summary" {
-    Write-Log "Log file: $script:LogFile" 'INFO'
-    Write-Log "BuildForge root: $script:BuildForgeRoot" 'INFO'
-    if ($script:OsPath) { Write-Log "OS image: $script:OsPath" 'INFO' }
-    if ($script:SelectedIndex) { Write-Log "Applied index: $script:SelectedIndex" 'INFO' }
-    if ($script:TargetDisk) { Write-Log "Disk used: #$($script:TargetDisk.Number)" 'INFO' }
-    Write-Log "Done." 'OK'
+    Write-Log "Log file location." 'INFO' -Context "Summary" -Detail $script:LogFile
+    Write-Log "BuildForge working root directory." 'INFO' -Context "Summary" -Detail $script:BuildForgeRoot
+    if ($script:OsPath) { Write-Log "Operating system image file used." 'INFO' -Context "Summary" -Detail $script:OsPath }
+    if ($script:SelectedIndex) { Write-Log "Image index applied." 'INFO' -Context "Summary" -Detail $script:SelectedIndex }
+    if ($script:TargetDisk) { Write-Log "Disk number used for installation." 'INFO' -Context "Summary" -Detail "#$($script:TargetDisk.Number)" }
+    Write-Log "Script execution completed." 'OK' -Context "Summary"
 }
