@@ -893,51 +893,91 @@ function Get-HPClientDriverPackCatalogXml {
 
 function Import-HPClientDriverPackCatalog {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$XmlPath)
+    param(
+        [Parameter(Mandatory)]
+        [string]$XmlPath
+    )
 
+    if (-not (Test-Path -LiteralPath $XmlPath)) {
+        throw "HP catalog XML not found: $XmlPath"
+    }
+
+    # Load XML
     [xml]$x = Get-Content -LiteralPath $XmlPath -Raw
 
-    # These nodes are explicitly used by OSD: SoftPaqList.SoftPaq and ProductOSDriverPackList.ProductOSDriverPack 
+    # Expected HP catalog nodes (same structure OSD / OSDCloud uses)
     $softPaqs = @($x.NewDataSet.HPClientDriverPackCatalog.SoftPaqList.SoftPaq)
     $mapRows  = @($x.NewDataSet.HPClientDriverPackCatalog.ProductOSDriverPackList.ProductOSDriverPack)
 
-    if (-not $softPaqs -or $softPaqs.Count -eq 0) { throw "HP catalog: SoftPaqList is empty." }
-    if (-not $mapRows  -or $mapRows.Count  -eq 0) { throw "HP catalog: ProductOSDriverPackList is empty." }
+    if (-not $softPaqs -or $softPaqs.Count -eq 0) {
+        throw "HP catalog parse failure: SoftPaqList is empty."
+    }
 
+    if (-not $mapRows -or $mapRows.Count -eq 0) {
+        throw "HP catalog parse failure: ProductOSDriverPackList is empty."
+    }
+
+    # Normalize SystemId values (HP often includes whitespace)
     foreach ($m in $mapRows) {
-        if ($m.SystemId) { $m.SystemId = $m.SystemId.Trim() }
+        if ($m.SystemId) {
+            $m.SystemId = $m.SystemId.Trim()
+        }
     }
 
     $results = New-Object System.Collections.Generic.List[object]
 
- foreach ($sp in $softPaqs) {
-    $id = [string]$sp.Id
-    if ([string]::IsNullOrWhiteSpace($id)) { continue }
+    foreach ($sp in $softPaqs) {
 
-    $matches = $mapRows | Where-Object { $_.SoftPaqId -match $id }
-    if (-not $matches) { continue }
-
-    # PS 5.1-safe try/catch (statement), then assign variable
-    $dateReleased = $null
-    try {
-        if (-not [string]::IsNullOrWhiteSpace([string]$sp.DateReleased)) {
-            $dateReleased = [datetime]$sp.DateReleased
+        $softPaqId = [string]$sp.Id
+        if ([string]::IsNullOrWhiteSpace($softPaqId)) {
+            continue
         }
-    } catch {
+
+        # Match SoftPaq to Product/OS rows
+        $matches = $mapRows | Where-Object {
+            $_.SoftPaqId -match $softPaqId
+        }
+
+        if (-not $matches) {
+            continue
+        }
+
+        # ---- DateReleased parsing (PS 5.1 SAFE) ----
         $dateReleased = $null
+        if ($sp.DateReleased) {
+            try {
+                $dateReleased = [datetime]$sp.DateReleased
+            }
+            catch {
+                $dateReleased = $null
+            }
+        }
+
+        # Build normalized object
+        $results.Add([pscustomobject]@{
+            SoftPaqId    = $softPaqId
+            Name         = [string]$sp.Name
+            Version      = [string]$sp.Version
+            DateReleased = $dateReleased
+            Url          = [string]$sp.Url
+            SystemIds    = @(
+                $matches |
+                Select-Object -ExpandProperty SystemId -Unique |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            )
+            OSNames      = @(
+                $matches |
+                Select-Object -ExpandProperty OSName -Unique |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            )
+        }) | Out-Null
     }
 
-    $results.Add([pscustomobject]@{
-        SoftPaqId    = [string]$sp.Id
-        Name         = [string]$sp.Name
-        Version      = [string]$sp.Version
-        DateReleased = $dateReleased
-        Url          = [string]$sp.Url
-        SystemIds    = @($matches | Select-Object -ExpandProperty SystemId -Unique)
-        OSNames      = @($matches | Select-Object -ExpandProperty OSName   -Unique)
-    }) | Out-Null
-}
+    if ($results.Count -eq 0) {
+        throw "HP catalog parsed successfully, but no usable driver pack entries were produced."
+    }
 
+    Write-Log ("HP catalog parsed: {0} driver pack entries loaded." -f $results.Count) 'OK'
     return $results
 }
 
