@@ -46,6 +46,8 @@ $script:DriverExtractDir= $null
 $script:TargetDisk      = $null
 $script:ImageIndexes    = $null
 $script:SelectedIndex   = $null
+
+$script:BuildForgeRootHistory = New-Object System.Collections.Generic.List[string]
 # ---------------------------
 # Fixed logging location (never moves)
 # ---------------------------
@@ -156,6 +158,7 @@ function Update-BuildForgeRoot {
         return
     }
     if ($script:BuildForgeRoot -ne $newRoot) {
+        $script:BuildForgeRootHistory.Add($script:BuildForgeRoot) | Out-Null
         Write-Log "BuildForgeRoot relocating: '$($script:BuildForgeRoot)' -> '$newRoot'" 'INFO'
         Move-BuildForgeContents -Source $script:BuildForgeRoot -Destination $newRoot
         $script:BuildForgeRoot = $newRoot
@@ -724,22 +727,82 @@ function Wait-ProcessTree {
 }
 
 function Expand-HPSoftPaq {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$SoftPaqExe,
-        [Parameter(Mandatory)][string]$Destination
+        [Parameter(Mandatory)]
+        [string] $SoftPaqExe,
+
+        [Parameter(Mandatory)]
+        [string] $Destination
     )
+
+    # Resolve moved EXE path (handles BuildForgeRoot relocation)
+    $SoftPaqExe = Resolve-ArtifactPath -Path $SoftPaqExe
+
+    if (-not (Test-Path -LiteralPath $SoftPaqExe)) {
+        throw "Expand-HPSoftPaq: SoftPaq EXE not found: $SoftPaqExe"
+    }
+
     Ensure-Dir $Destination
 
-    # HP SoftPaq unpack: sp####.exe -pdf -f<path> -s  (silent, override path) [4](https://h30434.www3.hp.com/t5/Commercial-PC-Software/FAQ-23-Unpacking-downloaded-SoftPaqs/td-p/5046732)
+    # HP SoftPaq unpack switches
     $args = @("-pdf", "-f$Destination", "-s")
-    Write-Log "Extracting HP SoftPaq -> $Destination" 'INFO'
 
-    $p = Start-Process -FilePath $SoftPaqExe -ArgumentList $args -PassThru -WindowStyle Hidden
+    Write-Log "Extracting HP SoftPaq -> $Destination" 'INFO'
+    Write-Log "SoftPaq EXE resolved path: $SoftPaqExe" 'INFO'
+
+    # Use full absolute path to avoid Start-Process resolution issues
+    $exeAbs = (Resolve-Path -LiteralPath $SoftPaqExe).Path
+
+    $p = Start-Process -FilePath $exeAbs -ArgumentList $args -PassThru -WindowStyle Hidden
     Wait-ProcessTree -RootPid $p.Id
 
     Write-Log "SoftPaq extraction complete: $Destination" 'OK'
 }
 
+function Resolve-ArtifactPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    if (Test-Path -LiteralPath $Path) { return $Path }
+
+    $leaf = [IO.Path]::GetFileName($Path)
+
+    # Common places we may have moved it to
+    $candidates = @()
+
+    # Current BuildForge root
+    if (Get-Variable -Name BuildForgeRoot -Scope Script -ErrorAction SilentlyContinue) {
+        if ($script:BuildForgeRoot) {
+            $candidates += @(
+                (Join-Path $script:BuildForgeRoot $leaf),
+                (Join-Path $script:BuildForgeRoot (Join-Path 'Drivers' $leaf)),
+                (Join-Path $script:BuildForgeRoot (Join-Path 'Downloads' $leaf))
+            )
+        }
+    }
+
+    # Known previous roots (optional; if you add history tracking later)
+    if (Get-Variable -Name BuildForgeRootHistory -Scope Script -ErrorAction SilentlyContinue) {
+        foreach ($r in $script:BuildForgeRootHistory) {
+            if ($r) {
+                $candidates += @(
+                    (Join-Path $r $leaf),
+                    (Join-Path $r (Join-Path 'Drivers' $leaf)),
+                    (Join-Path $r (Join-Path 'Downloads' $leaf))
+                )
+            }
+        }
+    }
+
+    $found = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($found) { return $found }
+
+    throw "Resolve-ArtifactPath: File not found. Original='$Path'. Looked for '$leaf' under current/known BuildForge roots."
+}
 # ---------------------------
 # MAIN
 # ---------------------------
@@ -983,7 +1046,9 @@ Invoke-Step " 18) Extract HP driver pack silently (wait for full process tree)" 
     # If it’s an HP SoftPaq EXE, use -pdf -f<path> -s [4](https://h30434.www3.hp.com/t5/Commercial-PC-Software/FAQ-23-Unpacking-downloaded-SoftPaqs/td-p/5046732)
     $ext = [IO.Path]::GetExtension($script:DriverPackPath).ToLowerInvariant()
     if ($ext -eq '.exe') {
-        Expand-HPSoftPaq -SoftPaqExe $script:DriverPackPath -Destination $extractDir
+       $script:DriverPackPath = Resolve-ArtifactPath -Path $script:DriverPackPath
+       Expand-HPSoftPaq -SoftPaqExe $script:DriverPackPath -Destination $extractDir
+
     } elseif ($ext -eq '.zip') {
         Expand-Archive -LiteralPath $script:DriverPackPath -DestinationPath $extractDir -Force
         Write-Log "Extracted ZIP -> $extractDir" 'OK'
