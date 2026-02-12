@@ -220,6 +220,48 @@ function Invoke-Step {
     }
 }
 
+function Finalize-LogPersistence {
+    [CmdletBinding()]
+    param()
+
+    $sourceLog = $script:LogFile
+    if (-not (Test-Path -LiteralPath $sourceLog)) {
+        return
+    }
+
+    $destRoot = 'W:\Windows\Temp\BuildForge'
+    $destLog  = Join-Path $destRoot 'BuildForge.log'
+
+    try {
+        if (-not (Test-Path -LiteralPath 'W:\Windows')) {
+            Write-Log "Windows volume not present. Log will remain in WinRE only." 'WARN'
+            return
+        }
+
+        if (-not (Test-Path -LiteralPath $destRoot)) {
+            New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
+        }
+
+        if (Test-Path -LiteralPath $destLog) {
+            # Append to existing log to avoid losing earlier runs
+            Add-Content -LiteralPath $destLog -Value (
+                "`r`n----- Appended log from WinRE session at $(Get-Date) -----`r`n"
+            )
+            Get-Content -LiteralPath $sourceLog | Add-Content -LiteralPath $destLog
+            Write-Log "Log appended to existing Windows log location." 'OK'
+        }
+        else {
+            Copy-Item -LiteralPath $sourceLog -Destination $destLog -Force
+            Write-Log "Log copied to Windows volume for persistence." 'OK'
+        }
+
+        Write-Detail ("Persistent log path: {0}" -f $destLog) 'INFO'
+    }
+    catch {
+        Write-Log ("Failed to persist log to Windows volume: {0}" -f $_.Exception.Message) 'WARN'
+    }
+}
+
 # ---------------------------
 # BuildForge root management (moves as W: becomes available)
 # ---------------------------
@@ -873,6 +915,51 @@ function Expand-HPSoftPaq {
         Write-Log ("Driver pack extracted (INF found: {0})" -f $infCount2) 'OK'
     }
 }
+function Cleanup-And-Restart {
+    [CmdletBinding()]
+    param()
+
+    # Safety checks
+    if (-not (Test-Path -LiteralPath 'W:\Windows')) {
+        Write-Log "Windows volume not detected. Cleanup and restart skipped." 'WARN'
+        return
+    }
+
+    $persistentLog = 'W:\Windows\Temp\BuildForge\BuildForge.log'
+    if (-not (Test-Path -LiteralPath $persistentLog)) {
+        Write-Log "Persistent log not found. Cleanup aborted to avoid data loss." 'ERROR'
+        return
+    }
+
+    # Cleanup temporary BuildForge working directory
+    $tempRoot = 'W:\BuildForge'
+    if (Test-Path -LiteralPath $tempRoot) {
+        try {
+            Write-Log "Removing temporary BuildForge working directory." 'INFO'
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction Stop
+            Write-Log "Temporary BuildForge directory removed." 'OK'
+        }
+        catch {
+            Write-Log ("Failed to remove W:\BuildForge: {0}" -f $_.Exception.Message) 'WARN'
+        }
+    }
+    else {
+        Write-Log "Temporary BuildForge directory not present. Nothing to clean." 'INFO'
+    }
+
+    # Ensure filesystem buffers are flushed
+    Write-Log "Finalizing and restarting system." 'INFO'
+
+    try {
+        # Preferred in WinRE
+        wpeutil reboot
+    }
+    catch {
+        # Fallback if wpeutil is unavailable
+        Write-Log "wpeutil not available. Falling back to Restart-Computer." 'WARN'
+        Restart-Computer -Force
+    }
+}
 
 # ---------------------------
 # MAIN
@@ -1170,4 +1257,28 @@ Invoke-Step "20" "Summary" {
     if ($script:SelectedIndex) { Write-Log ("Applied index: {0}" -f $script:SelectedIndex) 'INFO' }
     if ($script:TargetDisk)    { Write-Log ("Disk used: #{0}" -f $script:TargetDisk.Number) 'INFO' }
     Write-Log "Done." 'OK'
+}
+
+Invoke-Step "21" "Summary and log preservation" {
+    Write-Log ("Log file (WinRE): {0}" -f $script:LogFile) 'OK'
+    Write-Log ("Working root: {0}" -f $script:BuildForgeRoot) 'INFO'
+
+    if ($script:OsPath)        { Write-Log ("OS image: {0}" -f $script:OsPath) 'INFO' }
+    if ($script:SelectedIndex) { Write-Log ("Applied index: {0}" -f $script:SelectedIndex) 'INFO' }
+    if ($script:TargetDisk)    { Write-Log ("Disk used: #{0}" -f $script:TargetDisk.Number) 'INFO' }
+
+    Write-Log "Finalizing log persistence to Windows volume." 'INFO'
+    Finalize-LogPersistence
+
+    Write-Log "Done." 'OK'
+}
+
+Invoke-Step "22" "Cleanup temporary files and restart computer" {
+
+    Write-Log "Persistent log confirmed at Windows volume." 'OK'
+    Write-Log "Beginning final cleanup and system restart." 'INFO'
+
+    Cleanup-And-Restart
+
+    # No further output expected after this point
 }
