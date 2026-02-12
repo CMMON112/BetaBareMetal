@@ -744,42 +744,51 @@ function Expand-HPSoftPaq {
         [string] $Destination
     )
 
-    # Ensure destination exists
-    Ensure-Dir $Destination
-
+    $SoftPaqExe = Resolve-ArtifactPath -Path $SoftPaqExe
     if (-not (Test-Path -LiteralPath $SoftPaqExe)) {
         throw "Expand-HPSoftPaq: SoftPaq EXE not found: $SoftPaqExe"
     }
 
+    Ensure-Dir $Destination
     $exeAbs = (Resolve-Path -LiteralPath $SoftPaqExe).Path
-
-    # Detect supported args by asking for help output (many SoftPaqs print usage on /?)
-    $help = ''
-    try {
-        $help = & $exeAbs '/?' 2>&1 | Out-String
-    } catch {
-        # ignore if help invocation fails
-    }
-
-    # Choose argument style
-    if ($help -match '(?i)Usage:\s*/s\s*/e\s*/f') {
-        # Newer packaging: /s /e /f <target-path>
-        $args = @('/s', '/e', '/f', $Destination)
-        Write-Log "SoftPaq supports /s /e /f. Using: $($args -join ' ')" 'INFO'
-    }
-    else {
-        # Classic HP SoftPaq: -pdf -f<path> -s
-        $args = @('-pdf', "-f$Destination", '-s')
-        Write-Log "SoftPaq did not advertise /s /e /f. Falling back to: $($args -join ' ')" 'INFO'
-    }
 
     Write-Log "Extracting HP SoftPaq -> $Destination" 'INFO'
     Write-Log "SoftPaq EXE resolved path: $exeAbs" 'INFO'
 
-    $p = Start-Process -FilePath $exeAbs -ArgumentList $args -PassThru -WindowStyle Hidden
-    Wait-ProcessTree -RootPid $p.Id
+    # --- Try modern syntax first: /s /e /f <target-path> ---
+    # Many HP driver packs use this style (your sp160195.exe literally prints it).
+    $argsModern = @('/s','/e','/f', $Destination)
+    try {
+        Write-Log "Trying SoftPaq modern switches: $($argsModern -join ' ')" 'INFO'
+        $p = Start-Process -FilePath $exeAbs -ArgumentList $argsModern -PassThru -WindowStyle Hidden
+        Wait-ProcessTree -RootPid $p.Id
+    } catch {
+        Write-Log "Modern switch extraction threw: $($_.Exception.Message)" 'WARN'
+    }
 
-    Write-Log "SoftPaq extraction complete: $Destination" 'OK'
+    # If modern worked, we should see INF files somewhere under Destination
+    $infCount = (Get-ChildItem -LiteralPath $Destination -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
+    Write-Log "INF files after modern extraction attempt: $infCount" 'INFO'
+    if ($infCount -gt 0) {
+        Write-Log "SoftPaq extraction complete (modern): $Destination" 'OK'
+        return
+    }
+
+    # --- Fallback legacy syntax: -pdf -f<path> -s (older SoftPaqs) ---
+    $argsLegacy = @('-pdf', "-f$Destination", '-s')
+    Write-Log "Falling back to legacy switches: $($argsLegacy -join ' ')" 'WARN'
+
+    $p2 = Start-Process -FilePath $exeAbs -ArgumentList $argsLegacy -PassThru -WindowStyle Hidden
+    Wait-ProcessTree -RootPid $p2.Id
+
+    $infCount2 = (Get-ChildItem -LiteralPath $Destination -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
+    Write-Log "INF files after legacy extraction attempt: $infCount2" 'INFO'
+
+    if ($infCount2 -eq 0) {
+        Write-Log "SoftPaq extraction produced no INF files in $Destination. Content may be nested or extracted elsewhere (SWSetup/Temp)." 'WARN'
+    } else {
+        Write-Log "SoftPaq extraction complete (legacy): $Destination" 'OK'
+    }
 }
 
 function Resolve-ArtifactPath {
@@ -1092,10 +1101,12 @@ Invoke-Step "18) Extract HP driver pack silently (wait for full process tree)" {
     $extractDir = Join-Path $script:BuildForgeRoot 'ExtractedDrivers'
     Ensure-Dir $extractDir
 
-    # Ensure the path still exists after BuildForgeRoot relocation
     $script:DriverPackPath = Resolve-ArtifactPath -Path $script:DriverPackPath
 
     $ext = [IO.Path]::GetExtension($script:DriverPackPath).ToLowerInvariant()
+    if ($ext -ne '.exe' -and $ext -ne '.zip' -and $ext -ne '.cab') {
+        throw "Unknown driver pack extension '$ext' - cannot extract."
+    }
 
     if ($ext -eq '.exe') {
         Expand-HPSoftPaq -SoftPaqExe $script:DriverPackPath -Destination $extractDir
@@ -1108,31 +1119,65 @@ Invoke-Step "18) Extract HP driver pack silently (wait for full process tree)" {
         Invoke-Native -FilePath "expand.exe" -Arguments @("-F:*", $script:DriverPackPath, $extractDir) | Out-Null
         Write-Log "Extracted CAB -> $extractDir" 'OK'
     }
-    else {
-        throw "Unknown driver pack extension '$ext' - cannot extract."
+
+    # Search for INF files in likely locations
+    $candidates = @(
+        $extractDir,
+        'C:\SWSetup',
+        'W:\SWSetup',
+        'W:\Windows\Temp',
+        'X:\Windows\Temp'
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
+
+    $infHits = foreach ($c in $candidates) {
+        Get-ChildItem -LiteralPath $c -Recurse -Filter *.inf -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty DirectoryName -Unique |
+            ForEach-Object { [pscustomobject]@{ Root=$c; InfDir=$_ } }
     }
 
-    # Post-check: count INF files using the correct variable in this scope
-    $infCount = (Get-ChildItem -LiteralPath $extractDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
-    Write-Log "INF files found after extraction: $infCount" 'INFO'
+    if (-not $infHits) {
+        Write-Log "No .INF files found under candidates: $($candidates -join ', ')" 'ERROR'
+        throw "SoftPaq extraction produced no driver INFs. Cannot proceed with injection."
+    }
 
-    $script:DriverExtractDir = $extractDir
+    # Choose the folder with the most INFs beneath it (best injection root)
+    $grouped = $infHits | Group-Object InfDir | ForEach-Object {
+        [pscustomobject]@{ Path=$_.Name; Count=$_.Count }
+    } | Sort-Object Count -Descending
+
+    $bestInfDir = $grouped[0].Path
+    Write-Log "Selected driver root for injection (best INF dir): $bestInfDir (INF hits: $($grouped[0].Count))" 'OK'
+
+    $script:DriverExtractDir = $bestInfDir
 }
 
-Invoke-Step " 19) Inject drivers into offline image (DISM /Add-Driver /Recurse)" {
+Invoke-Step "19) Inject drivers into offline image (Add-WindowsDriver /Recurse)" {
     if (-not $script:DriverExtractDir) {
         Write-Log "No extracted drivers directory; skipping injection." 'WARN'
         return
     }
 
-    if ($PSCmdlet.ShouldProcess("W:\", "DISM Add-Driver /Recurse from $($script:DriverExtractDir)")) {
-        Invoke-Native -FilePath "dism.exe" -Arguments @(
-            "/Image:W:\",
-            "/Add-Driver",
-            "/Driver:$($script:DriverExtractDir)",
-            "/Recurse"
-        ) | Out-Null
-        Write-Log "Driver injection complete." 'OK'
+    if (-not (Test-Path -LiteralPath $script:DriverExtractDir)) {
+        throw "DriverExtractDir does not exist: $($script:DriverExtractDir)"
+    }
+
+    # Hard guard: ensure INF files exist before attempting injection
+    $infCount = (Get-ChildItem -LiteralPath $script:DriverExtractDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
+    Write-Log "INF files available for injection: $infCount (root=$($script:DriverExtractDir))" 'INFO'
+
+    if ($infCount -eq 0) {
+        throw "No .INF files found under '$($script:DriverExtractDir)'. Add-WindowsDriver requires .inf driver packages. (Fix extraction/selection first.)"
+    }
+
+    if ($PSCmdlet.ShouldProcess("W:\", "Add-WindowsDriver -Recurse from $($script:DriverExtractDir)")) {
+
+        # PowerShell cmdlet equivalent to DISM /Add-Driver /Recurse for offline images [1](https://www.tenforums.com/general-support/162980-what-index-number-how-do-i-find-thank-you.html)
+        Add-WindowsDriver -Path 'W:\' `
+                          -Driver $script:DriverExtractDir `
+                          -Recurse `
+                          -ErrorAction Stop | Out-Null
+
+        Write-Log "Driver injection complete (Add-WindowsDriver)." 'OK'
     }
 }
 
