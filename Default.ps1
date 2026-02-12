@@ -73,11 +73,12 @@ $script:OsSha1                = $null
 $script:OsSha256              = $null
 $script:OsPath                = $null
 $script:DriverMatch           = $null
-$script:DriverPackPath         = $null
+$script:DriverPackPath        = $null
 $script:DriverExtractDir      = $null
 $script:TargetDisk            = $null
 $script:ImageIndexes          = $null
 $script:SelectedIndex         = $null
+$script:Resume                = $null 
 $script:BuildForgeRootHistory = New-Object System.Collections.Generic.List[string]
 
 # Current step tracking
