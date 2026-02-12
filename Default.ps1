@@ -1252,6 +1252,71 @@ function Inject-DriversIntoWinREWim {
         Remove-Item -LiteralPath $mountDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+function Stage-WinREMinimalDrivers {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DriverRoot,
+        [Parameter(Mandatory)][string]$StageRoot
+    )
+
+    Ensure-Dir $StageRoot
+
+    # INF patterns that matter for WinRE
+    $patterns = @(
+        # --- Storage / chipset ---
+        'iaStor*.inf',        # Intel RST / VMD
+        'iaAHC*.inf',
+        'vmd*.inf',
+        'stornvme.inf',
+        'storahci.inf',
+        'amd*.inf',
+        'nvme*.inf',
+
+        # --- USB host / hub ---
+        'usb*.inf',
+        'xhci*.inf',
+        'usbxhci.inf',
+        'usbhub*.inf',
+        'usbport.inf',
+
+        # --- HID / input ---
+        'hid*.inf',
+        'kbd*.inf',
+        'mouse*.inf',
+        'i8042*.inf',
+
+        # --- Network (Ethernet only) ---
+        'net*.inf',
+        'e1*.inf',            # Intel Ethernet
+        'rt*.inf',            # Realtek
+        'mlx*.inf'            # Mellanox
+    )
+
+    $matchedInfs = New-Object System.Collections.Generic.List[string]
+
+    foreach ($pat in $patterns) {
+        Get-ChildItem -LiteralPath $DriverRoot -Recurse -Filter $pat -ErrorAction SilentlyContinue |
+            ForEach-Object { $matchedInfs.Add($_.FullName) | Out-Null }
+    }
+
+    $matchedInfs = $matchedInfs | Select-Object -Unique
+    if ($matchedInfs.Count -eq 0) {
+        Write-Log "No WinRE-relevant INF files found for minimal injection." 'WARN'
+        return $null
+    }
+
+    # Copy parent directories so referenced binaries come along
+    $dirs = $matchedInfs | ForEach-Object { Split-Path -Parent $_ } | Select-Object -Unique
+    foreach ($d in $dirs) {
+        $leaf = [IO.Path]::GetFileName($d)
+        Copy-Item -LiteralPath $d -Destination (Join-Path $StageRoot $leaf) -Recurse -Force
+    }
+
+    Write-Log ("Staged minimal WinRE drivers. INF matches: {0}" -f $matchedInfs.Count) 'OK'
+    return $StageRoot
+}
+
 # ---------------------------
 # Disk selection + partitioning
 # ---------------------------
@@ -1287,7 +1352,7 @@ function Get-TargetDisk {
 
 function Apply-UEFIPartitionLayout {
     [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][int]$DiskNumber, [int]$RecoveryMB=950, [int]$EfiMB=300)
+    param([Parameter(Mandatory)][int]$DiskNumber, [int]$RecoveryMB=800, [int]$EfiMB=300)
 
     $dpLines = @(
         "select disk $DiskNumber",
@@ -2061,18 +2126,44 @@ Invoke-Step "19" "Inject drivers into offline image (Add-WindowsDriver)" {
 }
 Invoke-Step "19.5" "Inject System/HID/USB/Net drivers into WinRE.wim" {
 
-    if (-not $script:DriverExtractDir -or -not (Test-Path -LiteralPath $script:DriverExtractDir)) {
+    # -----------------------------------------------------------------
+    # Guard conditions
+    # -----------------------------------------------------------------
+    if (-not $script:DriverExtractDir -or
+        -not (Test-Path -LiteralPath $script:DriverExtractDir)) {
         Write-Log "No extracted drivers directory found. WinRE injection skipped." 'WARN'
         return
     }
 
-    $subsetStage = Join-Path $script:BuildForgeRoot 'WinRE_ClassDrivers'
-    $subset = Stage-DriversByClass -DriverRoot $script:DriverExtractDir -StageRoot $subsetStage -IncludeClasses @('System','HIDClass','USB','Net')
-    if (-not $subset) { return }
-
-    # WinRE.wim path per your existing Step 17 copy location
     $winreWim = 'R:\Recovery\WindowsRE\Winre.wim'
-    Inject-DriversIntoWinREWim -WinreWimPath $winreWim -DriverRoot $subset
+    if (-not (Test-Path -LiteralPath $winreWim)) {
+        throw "WinRE.wim not found at expected path: $winreWim"
+    }
+
+    # -----------------------------------------------------------------
+    # Stage a MINIMAL, WinRE-safe driver set
+    # (storage + USB + HID + Ethernet only)
+    # -----------------------------------------------------------------
+    $subsetStage = Join-Path $script:BuildForgeRoot 'WinRE_MinimalDrivers'
+
+    $subset = Stage-WinREMinimalDrivers `
+        -DriverRoot $script:DriverExtractDir `
+        -StageRoot  $subsetStage
+
+    if (-not $subset) {
+        Write-Log "No WinRE-relevant drivers staged. Injection skipped." 'WARN'
+        return
+    }
+
+    # -----------------------------------------------------------------
+    # Inject into WinRE.wim
+    # -----------------------------------------------------------------
+    Write-Log ("Injecting minimal drivers into WinRE.wim: {0}" -f $winreWim) 'INFO'
+    Write-Detail ("WinRE driver source: {0}" -f $subset) 'INFO'
+
+    Inject-DriversIntoWinREWim `
+        -WinreWimPath $winreWim `
+        -DriverRoot  $subset
 }
 
 Invoke-Step "20" "Summary" {
