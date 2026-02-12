@@ -562,54 +562,69 @@ function Get-OfflineOsGuidFromBcd {
         throw "BCD store not found at '$BcdStorePath'. Is the EFI partition mounted as S:?"
     }
 
-    $out = & bcdedit.exe /enum all /store $BcdStorePath 2>&1
-    if (-not $out) {
-        throw "bcdedit returned no output when reading '$BcdStorePath'"
+    # Helper: true GUID identifier like {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
+    function Is-GuidIdentifier([string]$id) {
+        return ($id -match '^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$')
     }
 
-    # We want the Windows Boot Loader entry whose device is partition=W: and path is winload.efi
-    $currentId = $null
-    $currentDevice = $null
-    $isWinLoader = $false
+    # Enumerate BCD with verbose output so we can match device/path
+    $out = & bcdedit.exe /enum all /v /store $BcdStorePath 2>&1
+    if (-not $out) { throw "bcdedit returned no output for '$BcdStorePath'" }
 
-    foreach ($line in $out) {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $fallbackAliases = New-Object System.Collections.Generic.List[string]
 
-        if ($line -match '^\s*identifier\s+(\{.+\})\s*$') {
-            $currentId = $Matches[1]
-            $currentDevice = $null
-            $isWinLoader = $false
+    # Parse blocks separated by blank lines
+    $block = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $out + '') {  # add sentinel blank line
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            $block.Add($line) | Out-Null
             continue
         }
 
-        if ($line -match '^\s*device\s+partition=(.+?)\s*$') {
-            $currentDevice = $Matches[1]
-            continue
-        }
+        if ($block.Count -gt 0) {
+            $text = ($block -join "`n")
 
-        if ($line -match '^\s*path\s+\\Windows\\System32\\winload\.efi\s*$') {
-            $isWinLoader = $true
-            continue
-        }
+            # Look for Windows Boot Loader entry that targets W: and winload.efi
+            if ($text -match '(?im)^\s*path\s+\\Windows\\System32\\winload\.efi\s*$' -and
+                $text -match "(?im)^\s*device\s+partition=$([regex]::Escape($WindowsPartition))\s*$") {
 
-        # When we hit a blank line, we've reached the end of a block — evaluate it.
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            if ($currentId -and $isWinLoader -and $currentDevice -and ($currentDevice -match "^$([regex]::Escape($WindowsPartition))$")) {
-                return $currentId
+                $id = $null
+                if ($text -match '(?im)^\s*identifier\s+(\{.+?\})\s*$') {
+                    $id = $Matches[1].Trim()
+                }
+
+                if ($id) {
+                    if (Is-GuidIdentifier $id) {
+                        $candidates.Add($id) | Out-Null
+                    } else {
+                        # Remember alias-y identifiers like {default}/{current}
+                        $fallbackAliases.Add($id) | Out-Null
+                    }
+                }
             }
 
-            # reset for next block
-            $currentId = $null
-            $currentDevice = $null
-            $isWinLoader = $false
+            $block.Clear()
         }
     }
 
-    # Final block may not end with blank line
-    if ($currentId -and $isWinLoader -and $currentDevice -and ($currentDevice -match "^$([regex]::Escape($WindowsPartition))$")) {
-        return $currentId
+    # 1) Prefer a real GUID candidate
+    if ($candidates.Count -gt 0) {
+        return $candidates[0]
     }
 
-    throw "Could not locate an OS loader GUID in BCD store '$BcdStorePath' for device partition=$WindowsPartition (winload.efi)."
+    # 2) If we only found {default}/{current}, resolve bootmgr's "default" value
+    $bm = & bcdedit.exe /enum '{bootmgr}' /v /store $BcdStorePath 2>&1
+    if ($bm -and ($bm -match '(?im)^\s*default\s+(\{.+?\})\s*$')) {
+        $defaultId = $Matches[1].Trim()
+        if (Is-GuidIdentifier $defaultId) {
+            return $defaultId
+        }
+    }
+
+    # 3) If still no GUID, fail with actionable detail
+    $aliases = if ($fallbackAliases.Count -gt 0) { ($fallbackAliases | Select-Object -Unique) -join ', ' } else { '(none)' }
+    throw "Could not resolve a GUID OS loader identifier for $WindowsPartition. Found only aliases: $aliases. reagentc requires a GUID identifier (not {default}/{current})."
 }
 
 
@@ -942,9 +957,8 @@ Invoke-Step " 17) Setup WinRE WIM on recovery partition + register offline" {
             "/target", "W:\Windows"
         ) | Out-Null
 
-        # 2) WinRE/WinPE: enabling requires the OS loader GUID (/osguid) [1](https://www.delftstack.com/howto/powershell/wait-for-each-command-to-finish-in-powershell/)
-        $osGuid = Get-OfflineOsGuidFromBcd -BcdStorePath 'S:\EFI\Microsoft\Boot\BCD' -WindowsPartition 'W:'
-        Write-Log "Resolved OS loader GUID for WinRE binding: $osGuid" 'INFO'
+            $osGuid = Get-OfflineOsGuidFromBcd -BcdStorePath 'S:\EFI\Microsoft\Boot\BCD' -WindowsPartition 'W:'
+            Write-Log "Resolved OS loader GUID for WinRE binding: $osGuid" 'INFO'
 
         # 3) Enable WinRE bound to that OS GUID (do NOT use [default])
         Invoke-Native -FilePath $reagentc -Arguments @(
