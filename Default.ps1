@@ -94,7 +94,22 @@ Ensure-Var -Name 'SKU' -DefaultValue 'Enterprise'
 Ensure-Var -Name 'DriverCatalogUrl' -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml"
 Ensure-Var -Name 'OSCatalogUrl' -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
 
+function Ensure-ScriptVar {
+    param(
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter()][AllowNull()]$DefaultValue = $null
+    )
 
+    if (-not (Get-Variable -Name $Name -Scope Script -ErrorAction SilentlyContinue)) {
+        Set-Variable -Name $Name -Scope Script -Value $DefaultValue -Force
+    }
+}
+
+# Predeclare variables used by banners/logging BEFORE any step runs
+Ensure-ScriptVar -Name 'BuildForgeRoot' -DefaultValue $null
+Ensure-ScriptVar -Name 'TargetDisk'     -DefaultValue $null
+Ensure-ScriptVar -Name 'CurrentStepNumber' -DefaultValue ''
+Ensure-ScriptVar -Name 'CurrentStepName'   -DefaultValue ''
 
 # ---------------------------
 # Fixed logging location (never moves)
