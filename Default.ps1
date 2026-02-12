@@ -1080,36 +1080,43 @@ Invoke-Step " 17) Setup WinRE WIM on recovery partition + register offline" {
     }
 }
 
-Invoke-Step " 18) Extract HP driver pack silently (wait for full process tree)" {
+Invoke-Step "18) Extract HP driver pack silently (wait for full process tree)" {
+
     if (-not $script:DriverPackPath) {
         Write-Log "No driver pack downloaded; skipping extraction." 'WARN'
         return
     }
 
     Update-BuildForgeRoot
+
     $extractDir = Join-Path $script:BuildForgeRoot 'ExtractedDrivers'
     Ensure-Dir $extractDir
 
-    # If it’s an HP SoftPaq EXE, use -pdf -f<path> -s [4](https://h30434.www3.hp.com/t5/Commercial-PC-Software/FAQ-23-Unpacking-downloaded-SoftPaqs/td-p/5046732)
-    $ext = [IO.Path]::GetExtension($script:DriverPackPath).ToLowerInvariant()
-    if ($ext -eq '.exe') {
-       $script:DriverPackPath = Resolve-ArtifactPath -Path $script:DriverPackPath
-       Expand-HPSoftPaq -SoftPaqExe $script:DriverPackPath -Destination $extractDir
+    # Ensure the path still exists after BuildForgeRoot relocation
+    $script:DriverPackPath = Resolve-ArtifactPath -Path $script:DriverPackPath
 
-    } elseif ($ext -eq '.zip') {
+    $ext = [IO.Path]::GetExtension($script:DriverPackPath).ToLowerInvariant()
+
+    if ($ext -eq '.exe') {
+        Expand-HPSoftPaq -SoftPaqExe $script:DriverPackPath -Destination $extractDir
+    }
+    elseif ($ext -eq '.zip') {
         Expand-Archive -LiteralPath $script:DriverPackPath -DestinationPath $extractDir -Force
         Write-Log "Extracted ZIP -> $extractDir" 'OK'
-    } elseif ($ext -eq '.cab') {
+    }
+    elseif ($ext -eq '.cab') {
         Invoke-Native -FilePath "expand.exe" -Arguments @("-F:*", $script:DriverPackPath, $extractDir) | Out-Null
         Write-Log "Extracted CAB -> $extractDir" 'OK'
-    } else {
-        Write-Log "Unknown driver pack extension '$ext' (downloaded but not extracted)." 'WARN'
-        return
+    }
+    else {
+        throw "Unknown driver pack extension '$ext' - cannot extract."
     }
 
-    $script:DriverExtractDir = $extractDir
-    $infCount = (Get-ChildItem -LiteralPath $Destination -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
+    # Post-check: count INF files using the correct variable in this scope
+    $infCount = (Get-ChildItem -LiteralPath $extractDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
     Write-Log "INF files found after extraction: $infCount" 'INFO'
+
+    $script:DriverExtractDir = $extractDir
 }
 
 Invoke-Step " 19) Inject drivers into offline image (DISM /Add-Driver /Recurse)" {
