@@ -390,7 +390,14 @@ function Invoke-Download {
         [Parameter(Mandatory)][string]$DestPath
     )
 
-    Ensure-Dir (Split-Path -Parent $DestPath)
+    # CRITICAL: re-evaluate BuildForgeRoot after disk operations
+    Update-BuildForgeRoot
+
+    # Ensure full destination directory exists (WinRE-safe)
+    $parent = Split-Path -Parent $DestPath
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
 
     $leaf = [IO.Path]::GetFileName($DestPath)
 
@@ -405,9 +412,16 @@ function Invoke-Download {
     Write-Detail ("URL: {0}" -f $Url) 'INFO'
     Write-Detail ("Destination: {0}" -f $DestPath) 'INFO'
 
-    & $curl --fail --location --silent --show-error --retry 2 --retry-delay 3 --connect-timeout 30 --output $DestPath $Url
-    if ($LASTEXITCODE -ne 0) { throw "curl failed ($LASTEXITCODE) for $Url" }
+    & $curl --fail --location --silent --show-error `
+            --retry 2 --retry-delay 3 `
+            --connect-timeout 30 `
+            --output $DestPath $Url
 
+    if ($LASTEXITCODE -ne 0) {
+        throw "curl failed ($LASTEXITCODE) for $Url"
+    }
+
+    # WinRE defensive verification
     if (-not (Test-Path -LiteralPath $DestPath)) {
         throw "Download reported success but file missing: $DestPath"
     }
