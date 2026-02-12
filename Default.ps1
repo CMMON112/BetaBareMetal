@@ -902,91 +902,85 @@ function Import-HPClientDriverPackCatalog {
         throw "HP catalog XML not found: $XmlPath"
     }
 
-    # Load XML
     [xml]$x = Get-Content -LiteralPath $XmlPath -Raw
 
-    # Expected HP catalog nodes (same structure OSD / OSDCloud uses)
+    # These nodes are the canonical dataset paths used by OSD/OSDCloud [1](https://www.powershellgallery.com/packages/OSD/21.4.8.1/Content/Public%5CCatalog%5CGet-CatalogHPDriverPack.ps1)
     $softPaqs = @($x.NewDataSet.HPClientDriverPackCatalog.SoftPaqList.SoftPaq)
     $mapRows  = @($x.NewDataSet.HPClientDriverPackCatalog.ProductOSDriverPackList.ProductOSDriverPack)
 
     if (-not $softPaqs -or $softPaqs.Count -eq 0) {
         throw "HP catalog parse failure: SoftPaqList is empty."
     }
-
     if (-not $mapRows -or $mapRows.Count -eq 0) {
         throw "HP catalog parse failure: ProductOSDriverPackList is empty."
     }
 
-    # Normalize SystemId values (HP often includes whitespace)
-    foreach ($m in $mapRows) {
-        if ($m.SystemId) {
-            $m.SystemId = $m.SystemId.Trim()
+    # Build SoftPaq hashtable by Id (lower invariant key)
+    $softPaqById = @{}
+    foreach ($sp in $softPaqs) {
+        $id = [string]$sp.Id
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+
+        $key = $id.Trim().ToLowerInvariant()
+
+        # Parse DateReleased safely (PS 5.1)
+        $dateReleased = $null
+        if ($sp.DateReleased) {
+            try { $dateReleased = [datetime]$sp.DateReleased } catch { $dateReleased = $null }
+        }
+
+        $softPaqById[$key] = [pscustomobject]@{
+            Id           = $id.Trim()
+            Name         = [string]$sp.Name
+            Version      = [string]$sp.Version
+            Category     = [string]$sp.Category
+            DateReleased = $dateReleased
+            Url          = [string]$sp.Url
+            Sha256       = [string]$sp.SHA256
+            Size         = [string]$sp.Size
+            CvaFileUrl   = [string]$sp.CvaFileUrl
         }
     }
 
-    $results = New-Object System.Collections.Generic.List[object]
+    # Normalize and project ProductOSDriverPack rows
+    $driverPackMap = New-Object System.Collections.Generic.List[object]
+    foreach ($m in $mapRows) {
+        $sysId = [string]$m.SystemId
+        if (-not [string]::IsNullOrWhiteSpace($sysId)) { $sysId = $sysId.Trim() }
 
-    foreach ($sp in $softPaqs) {
-
-        $softPaqId = [string]$sp.Id
-        if ([string]::IsNullOrWhiteSpace($softPaqId)) {
-            continue
-        }
-
-        # Match SoftPaq to Product/OS rows
-        $matches = $mapRows | Where-Object {
-            $_.SoftPaqId -match $softPaqId
-        }
-
-        if (-not $matches) {
-            continue
-        }
-
-        # ---- DateReleased parsing (PS 5.1 SAFE) ----
-        $dateReleased = $null
-        if ($sp.DateReleased) {
-            try {
-                $dateReleased = [datetime]$sp.DateReleased
-            }
-            catch {
-                $dateReleased = $null
-            }
-        }
-
-        # Build normalized object
-        $results.Add([pscustomobject]@{
-            SoftPaqId    = $softPaqId
-            Name         = [string]$sp.Name
-            Version      = [string]$sp.Version
-            DateReleased = $dateReleased
-            Url          = [string]$sp.Url
-            SystemIds    = @(
-                $matches |
-                Select-Object -ExpandProperty SystemId -Unique |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-            )
-            OSNames      = @(
-                $matches |
-                Select-Object -ExpandProperty OSName -Unique |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-            )
+        $driverPackMap.Add([pscustomobject]@{
+            Architecture = [string]$m.Architecture
+            ProductType  = [string]$m.ProductType
+            SystemId     = $sysId
+            SystemName   = [string]$m.SystemName
+            OSName       = [string]$m.OSName
+            OSId         = [string]$m.OSId
+            SoftPaqId    = [string]$m.SoftPaqId
+            ProductId    = [string]$m.ProductId
         }) | Out-Null
     }
 
-    if ($results.Count -eq 0) {
-        throw "HP catalog parsed successfully, but no usable driver pack entries were produced."
+    $result = [pscustomobject]@{
+        SoftPaqById   = $softPaqById
+        DriverPackMap = $driverPackMap
     }
 
-    Write-Log ("HP catalog parsed: {0} driver pack entries loaded." -f $results.Count) 'OK'
-    return $results
+    Write-Log ("HP catalog parsed: SoftPaqs={0}  DriverPackMap={1}" -f $softPaqById.Count, $driverPackMap.Count) 'OK'
+    return $result
 }
+
 
 function Find-HPDriverPackBestMatch {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][object]$Hardware,
-        [Parameter(Mandatory)][object[]]$HpCatalogItems,
-        [Parameter(Mandatory)][string]$ReleaseId
+        [Parameter(Mandatory)]
+        [object]$Hardware,
+
+        [Parameter(Mandatory)]
+        [object]$HpCatalog,   # output of Import-HPClientDriverPackCatalog
+
+        [Parameter(Mandatory)]
+        [string]$ReleaseId
     )
 
     function Norm([string]$s) {
@@ -994,86 +988,125 @@ function Find-HPDriverPackBestMatch {
         return ($s -replace '\s+',' ').Trim().ToUpperInvariant()
     }
 
-    $hw = [pscustomobject]@{
-        CSManufacturer = Norm $Hardware.CSManufacturer
-        CSModel        = Norm $Hardware.CSModel
-        BBManufacturer = Norm $Hardware.BBManufacturer
-        BBModel        = Norm $Hardware.BBModel
-        BBSKU          = Norm $Hardware.BBSKU
-        BBProduct      = Norm $Hardware.BBProduct
+    # Only HP
+    $mfg = Norm $Hardware.CSManufacturer
+    if (-not ($mfg -match 'HP|HEWLETT')) {
+        return [pscustomobject]@{ Matched=$false; Reason="Not HP"; Candidates=@() }
     }
 
-    # If not HP, return no match
-    if (-not ($hw.CSManufacturer -match 'HP|HEWLETT')) {
-        return [pscustomobject]@{ Matched=$false; Reason="Not an HP system"; Candidates=@() }
+    # SystemId must match BBProduct (your "8b41" case)
+    $bbProduct = Norm $Hardware.BBProduct
+    if ([string]::IsNullOrWhiteSpace($bbProduct)) {
+        return [pscustomobject]@{ Matched=$false; Reason="BBProduct is empty; cannot match SystemId"; Candidates=@() }
     }
 
-    $wantOsToken = "WINDOWS 11"
-    $wantRelToken = $ReleaseId.ToUpperInvariant()
+    # OS preference list (ReleaseId first, then descend)
+    $preferred = New-Object System.Collections.Generic.List[string]
+    $preferred.Add($ReleaseId.ToUpperInvariant()) | Out-Null
 
-    $scored = foreach ($item in $HpCatalogItems) {
-        $sysIds = @($item.SystemIds | ForEach-Object { Norm $_ })
+    foreach ($x in @('26H2','25H2','24H2','23H2','22H2','21H2')) {
+        if ($preferred -notcontains $x) { $preferred.Add($x) | Out-Null }
+    }
 
-        $score = 0
-        $matched = @()
+    function Get-OsRank([string]$osName) {
+        if ([string]::IsNullOrWhiteSpace($osName)) { return 0 }
+        $u = $osName.ToUpperInvariant()
 
-        # OS preference
-        $osNames = @($item.OSNames | ForEach-Object { Norm $_ })
-        if ($osNames -match $wantOsToken) { $score += 10; $matched += "OS=Win11" }
+        # Hard gate: Windows 11 only
+        if ($u -notmatch 'WINDOWS 11') { return 0 }
+        if ($u -match 'WINDOWS 10')    { return 0 }
 
-        # ReleaseId preference (best effort: match token anywhere in name)
-        $name = Norm $item.Name
-        if ($name -and $name -match $wantRelToken) { $score += 6; $matched += "Release=$ReleaseId" }
+        # Prefer 64-bit (optional – your environment is x64)
+        $score = 10
+        if ($u -match '64-BIT') { $score += 5 }
 
-        # Strong HP system id match
-        if ($hw.BBProduct -and ($sysIds -contains $hw.BBProduct)) { $score += 30; $matched += "SystemId(BBProduct)" }
-        if ($hw.BBSKU     -and ($sysIds -contains $hw.BBSKU))     { $score += 20; $matched += "SystemId(BBSKU)" }
+        # Highest preference = first hit in preferred list
+        $i = 0
+        foreach ($p in $preferred) {
+            if ($u -match [regex]::Escape($p)) {
+                # earlier in list => larger score
+                return $score + (1000 - ($i * 50))
+            }
+            $i++
+        }
 
-        # Weaker heuristics
-        if ($hw.CSModel -and $name -and $name -match [regex]::Escape($hw.CSModel)) { $score += 3; $matched += "ModelText" }
+        # Win11 but no known H2 token
+        return $score + 100
+    }
 
-        [pscustomobject]@{
-            Score   = $score
-            Matched = ($matched -join ',')
-            Item    = $item
+    # Filter rows: exact SystemId match + Win11 only
+    $candidates = @()
+    foreach ($row in $HpCatalog.DriverPackMap) {
+        $sid = Norm $row.SystemId
+        if ($sid -ne $bbProduct) { continue }
+
+        $rank = Get-OsRank -osName $row.OSName
+        if ($rank -le 0) { continue }
+
+        $candidates += [pscustomobject]@{
+            Row  = $row
+            Rank = $rank
         }
     }
 
-    $ordered = $scored | Sort-Object Score, @{e={$_.Item.DateReleased};Descending=$true} -Descending
-    $top = $ordered | Select-Object -First 1
-
-    if (-not $top -or $top.Score -lt 10 -or -not $top.Item.Url) {
+    if (-not $candidates -or $candidates.Count -eq 0) {
         return [pscustomobject]@{
             Matched=$false
-            Reason=("No strong HP driver pack match found. BestScore={0}" -f $(if($top){$top.Score}else{'n/a'}))
-            Candidates=($ordered | Select-Object -First 10)
+            Reason=("No Windows 11 driver pack rows for SystemId '{0}'" -f $bbProduct)
+            Candidates=@()
         }
     }
-    function Try-Extract-HPDriverPack {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$SoftPaqPath,
-        [Parameter(Mandatory)][string]$Destination
-    )
 
-    Ensure-Dir $Destination
+    # Sort best OS rank, then newest SoftPaq DateReleased (if known)
+    $best = $null
+    $bestRank = -1
+    $bestDate = [datetime]::MinValue
 
-    try {
-        # Your existing extractor (SoftPaq switches) may work IF exe can run
-        Expand-HPSoftPaq -SoftPaqExe $SoftPaqPath -Destination $Destination
+    foreach ($c in ($candidates | Sort-Object Rank -Descending)) {
+        $spid = [string]$c.Row.SoftPaqId
+        if ([string]::IsNullOrWhiteSpace($spid)) { continue }
 
-        $infCount = (Get-ChildItem -LiteralPath $Destination -Recurse -Filter *.inf -ErrorAction SilentlyContinue | Measure-Object).Count
-        if ($infCount -gt 0) {
-            return [pscustomobject]@{ Extracted=$true; Path=$Destination; InfCount=$infCount; Reason="" }
+        $key = $spid.Trim().ToLowerInvariant()
+        if (-not $HpCatalog.SoftPaqById.ContainsKey($key)) { continue }
+
+        $sp = $HpCatalog.SoftPaqById[$key]
+
+        # Need URL + SHA256 for your workflow
+        if ([string]::IsNullOrWhiteSpace($sp.Url))    { continue }
+        if ([string]::IsNullOrWhiteSpace($sp.Sha256)) { continue }
+
+        $dt = $sp.DateReleased
+        if (-not $dt) { $dt = [datetime]::MinValue }
+
+        if ($c.Rank -gt $bestRank -or ($c.Rank -eq $bestRank -and $dt -gt $bestDate)) {
+            $best = [pscustomobject]@{ Candidate=$c; SoftPaq=$sp }
+            $bestRank = $c.Rank
+            $bestDate = $dt
         }
-
-        return [pscustomobject]@{ Extracted=$false; Path=$Destination; InfCount=0; Reason="No INFs found after extraction attempt." }
     }
-    catch {
-        # This is expected on many WinPE/WinRE x64 builds: 32-bit HP EXE won't run [3](https://stackoverflow.com/questions/509853/powershell-how-do-i-test-for-a-variable-value-with-set-strictmode-version-la)
-        return [pscustomobject]@{ Extracted=$false; Path=$Destination; InfCount=0; Reason=$_.Exception.Message }
+
+    if (-not $best) {
+        return [pscustomobject]@{
+            Matched=$false
+            Reason="Found matching Win11 rows, but no SoftPaq had both Url and SHA256"
+            Candidates=($candidates | Select-Object -First 10)
+        }
+    }
+
+    return [pscustomobject]@{
+        Matched      = $true
+        SystemId     = $bbProduct
+        OSName       = $best.Candidate.Row.OSName
+        SoftPaqId    = $best.SoftPaq.Id
+        Url          = $best.SoftPaq.Url
+        Sha256       = $best.SoftPaq.Sha256
+        Name         = $best.SoftPaq.Name
+        Version      = $best.SoftPaq.Version
+        DateReleased = $best.SoftPaq.DateReleased
+        Rank         = $bestRank
     }
 }
+
 function Inject-DriversOfflineWindows {
     [CmdletBinding()]
     param(
@@ -1644,26 +1677,17 @@ Invoke-Step "6" "Match OS entry from catalog" {
 
 Invoke-Step "7" "HP DriverPack match via HPClientDriverPackCatalog.cab" {
 
-    # Only attempt on HP machines
     if (-not ($script:Hardware.CSManufacturer -match 'HP|Hewlett')) {
         Write-Log "Not an HP system. HP DriverPack catalog step skipped." 'INFO'
         return
     }
 
-    # ---------------- DEBUG: Cab URL sanity (PS 5.1 safe) ----------------
+    # Debug (optional)
     $raw = $HpDriverPackCatalogCabUrl
     $isEmpty = [string]::IsNullOrWhiteSpace($raw)
-    $len = 0
-    if (-not $isEmpty) { $len = $raw.Length }
-
     Write-Log ("DEBUG HpDriverPackCatalogCabUrl raw: '{0}'" -f $raw) 'INFO'
     Write-Log ("DEBUG HpDriverPackCatalogCabUrl isNullOrWhiteSpace: {0}" -f $isEmpty) 'INFO'
-    Write-Log ("DEBUG HpDriverPackCatalogCabUrl length: {0}" -f $len) 'INFO'
-
-    if ($isEmpty) {
-        throw "HpDriverPackCatalogCabUrl is empty at Step 7 (shadowed/overwritten before bootstrap)."
-    }
-    # --------------------------------------------------------------------
+    if ($isEmpty) { throw "HpDriverPackCatalogCabUrl is empty at Step 7." }
 
     Update-BuildForgeRoot
     $hpCatDir = Join-Path $script:BuildForgeRoot 'Catalogs'
@@ -1673,29 +1697,30 @@ Invoke-Step "7" "HP DriverPack match via HPClientDriverPackCatalog.cab" {
     $xmlPath = Get-HPClientDriverPackCatalogXml -CabUrl $HpDriverPackCatalogCabUrl -WorkingDir $hpCatDir
 
     Write-Log "Parsing HP DriverPack catalog XML..." 'INFO'
-    $hpItems = Import-HPClientDriverPackCatalog -XmlPath $xmlPath
+    $hpCatalog = Import-HPClientDriverPackCatalog -XmlPath $xmlPath
 
-    Write-Log "Selecting best HP DriverPack match for Win11 (24H2+)..." 'INFO'
-    $match = Find-HPDriverPackBestMatch -Hardware $script:Hardware -HpCatalogItems $hpItems -ReleaseId $ReleaseId
+    Write-Log "Selecting best HP DriverPack match for Windows 11 (Release preference applied)..." 'INFO'
+    $match = Find-HPDriverPackBestMatch -Hardware $script:Hardware -HpCatalog $hpCatalog -ReleaseId $ReleaseId
 
     if (-not $match.Matched) {
         Write-Log ("HP DriverPack match failed: {0}" -f $match.Reason) 'WARN'
         return
     }
 
-    # Override/seed existing DriverMatch object so the rest of your pipeline stays unchanged
+    Write-Log ("HP DriverPack matched: {0} ({1})" -f $match.SoftPaqId, $match.OSName) 'OK'
+    Write-Detail ("HP DriverPack URL: {0}" -f $match.Url) 'INFO'
+    Write-Detail ("HP DriverPack SHA256: {0}" -f $match.Sha256) 'INFO'
+    Write-Detail ("Rank={0} Date={1}" -f $match.Rank, $match.DateReleased) 'INFO'
+
+    # Seed DriverMatch for your existing Step 12/Confirm-FileHash
     $script:DriverMatch = [pscustomobject]@{
         Matched   = $true
         URL       = $match.Url
         Sha1      = $null
-        Sha256    = $null
-        Score     = $match.Score
-        MatchInfo = $match.MatchInfo
+        Sha256    = $match.Sha256
+        Score     = $match.Rank
+        MatchInfo = ("SystemId={0}; OSName={1}; SoftPaqId={2}" -f $match.SystemId, $match.OSName, $match.SoftPaqId)
     }
-
-    Write-Log ("HP DriverPack matched (Score={0})" -f $match.Score) 'OK'
-    Write-Detail ("Matched fields: {0}" -f $match.MatchInfo) 'INFO'
-    Write-Detail ("DriverPack URL: {0}" -f $match.Url) 'INFO'
 }
 
 Invoke-Step "8" "Select best local disk for OS" {
