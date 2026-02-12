@@ -57,47 +57,36 @@ param(
     [string] $OnlyStep = $null
 )
 
-$ErrorActionPreference = 'Stop'
-Set-StrictMode -Version 2.0
+# ---------------------------
+# StrictMode-safe bootstrapping for ScriptBlock/IEX execution
+# - Under ScriptBlock/Invoke-Expression, script params may not bind -> vars may not exist.
+# - StrictMode 2.0 throws on uninitialized variables, so predeclare everything we might read.
+# ---------------------------
 
-# Bootstrap param variables for Invoke-Expression execution
-function Ensure-Var {
+function Ensure-LocalVar {
     param(
         [Parameter(Mandatory=$true)]
-        [string]$Name,
+        [string] $Name,
 
         [Parameter()]
         [AllowNull()]
         $DefaultValue = $null
     )
 
-    if (-not (Get-Variable -Name $Name -Scope 0 -ErrorAction SilentlyContinue)) {
-        Set-Variable -Name $Name -Scope 0 -Value $DefaultValue -Force
+    # Local scope is deterministic for scriptblock execution
+    if (-not (Get-Variable -Name $Name -Scope Local -ErrorAction SilentlyContinue)) {
+        Set-Variable -Name $Name -Scope Local -Value $DefaultValue -Force
     }
 }
 
-Ensure-Var -Name 'Resume' -DefaultValue $false
-Ensure-Var -Name 'FromStep' -DefaultValue $null
-Ensure-Var -Name 'OnlyStep' -DefaultValue $null
-Ensure-Var -Name 'ForceRepartition' -DefaultValue $true
-Ensure-Var -Name 'ForceRedownload' -DefaultValue $false
-Ensure-Var -Name 'ForceApplyImage' -DefaultValue $false
-Ensure-Var -Name 'TargetDiskNumber' -DefaultValue -1
-
-# Optional: these are already safe via param defaults, but harmless to define if missing:
-Ensure-Var -Name 'OperatingSystem' -DefaultValue 'Windows 11'
-Ensure-Var -Name 'ReleaseId' -DefaultValue '25H2'
-Ensure-Var -Name 'Architecture' -DefaultValue 'amd64'
-Ensure-Var -Name 'LanguageCode' -DefaultValue 'en-us'
-Ensure-Var -Name 'License' -DefaultValue 'Volume'
-Ensure-Var -Name 'SKU' -DefaultValue 'Enterprise'
-Ensure-Var -Name 'DriverCatalogUrl' -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml"
-Ensure-Var -Name 'OSCatalogUrl' -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
-
 function Ensure-ScriptVar {
     param(
-        [Parameter(Mandatory=$true)][string]$Name,
-        [Parameter()][AllowNull()]$DefaultValue = $null
+        [Parameter(Mandatory=$true)]
+        [string] $Name,
+
+        [Parameter()]
+        [AllowNull()]
+        $DefaultValue = $null
     )
 
     if (-not (Get-Variable -Name $Name -Scope Script -ErrorAction SilentlyContinue)) {
@@ -105,11 +94,51 @@ function Ensure-ScriptVar {
     }
 }
 
-# Predeclare variables used by banners/logging BEFORE any step runs
-Ensure-ScriptVar -Name 'BuildForgeRoot' -DefaultValue $null
-Ensure-ScriptVar -Name 'TargetDisk'     -DefaultValue $null
+# ---- "Parameter-like" variables (safe defaults when called with NO args) ----
+Ensure-LocalVar -Name 'Resume'          -DefaultValue $false
+Ensure-LocalVar -Name 'FromStep'        -DefaultValue $null
+Ensure-LocalVar -Name 'OnlyStep'        -DefaultValue $null
+Ensure-LocalVar -Name 'ForceRepartition'-DefaultValue $true
+Ensure-LocalVar -Name 'ForceRedownload' -DefaultValue $false
+Ensure-LocalVar -Name 'ForceApplyImage' -DefaultValue $false
+Ensure-LocalVar -Name 'TargetDiskNumber'-DefaultValue -1
+
+Ensure-LocalVar -Name 'OperatingSystem' -DefaultValue 'Windows 11'
+Ensure-LocalVar -Name 'ReleaseId'       -DefaultValue '25H2'
+Ensure-LocalVar -Name 'Architecture'    -DefaultValue 'amd64'
+Ensure-LocalVar -Name 'LanguageCode'    -DefaultValue 'en-us'
+Ensure-LocalVar -Name 'License'         -DefaultValue 'Volume'
+Ensure-LocalVar -Name 'SKU'             -DefaultValue 'Enterprise'
+Ensure-LocalVar -Name 'DriverCatalogUrl'-DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml"
+Ensure-LocalVar -Name 'OSCatalogUrl'    -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
+
+# ---- Script-scope variables referenced by banners/logging BEFORE Step 1 ----
+# These MUST exist under StrictMode 2.0 or the first read will terminate. [1](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/set-strictmode?view=powershell-7.5)
+Ensure-ScriptVar -Name 'BuildForgeRoot'        -DefaultValue $null
+Ensure-ScriptVar -Name 'BuildForgeRootHistory' -DefaultValue (New-Object System.Collections.Generic.List[string])
+
+Ensure-ScriptVar -Name 'Hardware'         -DefaultValue $null
+Ensure-ScriptVar -Name 'OSCatalog'        -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverCatalog'    -DefaultValue $null
+Ensure-ScriptVar -Name 'OsEntry'          -DefaultValue $null
+Ensure-ScriptVar -Name 'OsUrl'            -DefaultValue $null
+Ensure-ScriptVar -Name 'OsSha1'           -DefaultValue $null
+Ensure-ScriptVar -Name 'OsSha256'         -DefaultValue $null
+Ensure-ScriptVar -Name 'OsPath'           -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverMatch'      -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverPackPath'   -DefaultValue $null
+Ensure-ScriptVar -Name 'DriverExtractDir' -DefaultValue $null
+Ensure-ScriptVar -Name 'TargetDisk'       -DefaultValue $null
+Ensure-ScriptVar -Name 'ImageIndexes'     -DefaultValue $null
+Ensure-ScriptVar -Name 'SelectedIndex'    -DefaultValue $null
+
 Ensure-ScriptVar -Name 'CurrentStepNumber' -DefaultValue ''
 Ensure-ScriptVar -Name 'CurrentStepName'   -DefaultValue ''
+
+# Fixed log paths (these are used very early)
+Ensure-ScriptVar -Name 'LogRoot' -DefaultValue 'X:\Windows\Temp\BuildForge'
+Ensure-ScriptVar -Name 'LogFile' -DefaultValue (Join-Path $script:LogRoot 'BuildForge.log')
+
 
 # ---------------------------
 # Fixed logging location (never moves)
