@@ -112,15 +112,12 @@ Ensure-LocalVar -Name 'SKU'             -DefaultValue 'Enterprise'
 # ---------------------------------------------------------------------
 # Catalog URLs (always non-empty)
 # ---------------------------------------------------------------------
-Ensure-LocalVar -Name 'OSCatalogUrl' `
-    -DefaultValue 'https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml'
+Ensure-LocalVar -Name 'OSCatalogUrl'  -DefaultValue 'https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml'
 
-Ensure-LocalVar -Name 'DriverCatalogUrl' `
-    -DefaultValue 'https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml'
+Ensure-LocalVar -Name 'DriverCatalogUrl' -DefaultValue 'https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml'
 
 # HP REAL driver pack catalog (OSDCloud / OSD uses this)
-Ensure-LocalVar -Name 'HpDriverPackCatalogCabUrl' `
-    -DefaultValue 'https://ftp.hp.com/pub/caps-softpaq/cmit/HPClientDriverPackCatalog.cab'
+Ensure-LocalVar -Name 'HpDriverPackCatalogCabUrl' -DefaultValue 'https://ftp.hp.com/pub/caps-softpaq/cmit/HPClientDriverPackCatalog.cab'
 
 # ---------------------------------------------------------------------
 # Script-scope state (used by banners, logging, steps)
