@@ -60,36 +60,42 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
-# ---------------------------
-# Parameter defaults bootstrap (StrictMode-safe for Invoke-Expression execution)
-# ---------------------------
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+
+# Bootstrap param variables for Invoke-Expression execution
 function Ensure-Var {
     param(
-        [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)]$DefaultValue
+        [Parameter(Mandatory=$true)]
+        [string]$Name,
+        [Parameter()]
+        [AllowNull()]
+        $DefaultValue
     )
     if (-not (Get-Variable -Name $Name -Scope 0 -ErrorAction SilentlyContinue)) {
         Set-Variable -Name $Name -Scope 0 -Value $DefaultValue -Force
     }
 }
 
-# If this script is executed via Invoke-Expression, param() binding may not run,
-# so ensure every "param" variable exists with sane defaults.
-Ensure-Var -Name 'OperatingSystem'   -DefaultValue 'Windows 11'
-Ensure-Var -Name 'ReleaseId'         -DefaultValue '25H2'
-Ensure-Var -Name 'Architecture'      -DefaultValue 'amd64'
-Ensure-Var -Name 'LanguageCode'      -DefaultValue 'en-us'
-Ensure-Var -Name 'License'           -DefaultValue 'Volume'
-Ensure-Var -Name 'SKU'               -DefaultValue 'Enterprise'
-Ensure-Var -Name 'DriverCatalogUrl'  -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml"
-Ensure-Var -Name 'OSCatalogUrl'      -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
-Ensure-Var -Name 'TargetDiskNumber'  -DefaultValue -1
-Ensure-Var -Name 'ForceRepartition'  -DefaultValue $true
-Ensure-Var -Name 'ForceRedownload'   -DefaultValue $false
-Ensure-Var -Name 'ForceApplyImage'   -DefaultValue $false
-Ensure-Var -Name 'Resume'            -DefaultValue $false
-Ensure-Var -Name 'FromStep'          -DefaultValue $null
-Ensure-Var -Name 'OnlyStep'          -DefaultValue $null
+Ensure-Var -Name 'Resume' -DefaultValue $false
+Ensure-Var -Name 'FromStep' -DefaultValue $null
+Ensure-Var -Name 'OnlyStep' -DefaultValue $null
+Ensure-Var -Name 'ForceRepartition' -DefaultValue $true
+Ensure-Var -Name 'ForceRedownload' -DefaultValue $false
+Ensure-Var -Name 'ForceApplyImage' -DefaultValue $false
+Ensure-Var -Name 'TargetDiskNumber' -DefaultValue -1
+
+# Optional: these are already safe via param defaults, but harmless to define if missing:
+Ensure-Var -Name 'OperatingSystem' -DefaultValue 'Windows 11'
+Ensure-Var -Name 'ReleaseId' -DefaultValue '25H2'
+Ensure-Var -Name 'Architecture' -DefaultValue 'amd64'
+Ensure-Var -Name 'LanguageCode' -DefaultValue 'en-us'
+Ensure-Var -Name 'License' -DefaultValue 'Volume'
+Ensure-Var -Name 'SKU' -DefaultValue 'Enterprise'
+Ensure-Var -Name 'DriverCatalogUrl' -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml"
+Ensure-Var -Name 'OSCatalogUrl' -DefaultValue "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml"
+
+
 
 # ---------------------------
 # Fixed logging location (never moves)
