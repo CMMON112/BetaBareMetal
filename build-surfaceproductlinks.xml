@@ -6,650 +6,380 @@
     </TN>
     <MS>
       <S N="Model">Surface 3 (4G LTE) in North America (non-AT&amp;T)</S>
-      <Obj N="DownloadLinks" RefId="1">
-        <TN RefId="1">
-          <T>System.Object[]</T>
-          <T>System.Array</T>
-          <T>System.Object</T>
-        </TN>
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=49037</S>
-        </LST>
-      </Obj>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=49037</S>
+    </MS>
+  </Obj>
+  <Obj RefId="1">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface 3 (AT&amp;T 4G LTE)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=49039</S>
     </MS>
   </Obj>
   <Obj RefId="2">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface 3 (AT&amp;T 4G LTE)</S>
-      <Obj N="DownloadLinks" RefId="3">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=49039</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface 3 (Verizon 4G LTE)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=49920</S>
+    </MS>
+  </Obj>
+  <Obj RefId="3">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface 3 (Wi-Fi)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=49040</S>
     </MS>
   </Obj>
   <Obj RefId="4">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface 3 (Verizon 4G LTE)</S>
-      <Obj N="DownloadLinks" RefId="5">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=49920</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface 3 (Y!mobile 4G LTE) and Surface 3 (4G LTE) outside of North America</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=49041</S>
+    </MS>
+  </Obj>
+  <Obj RefId="5">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Book</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=49497</S>
     </MS>
   </Obj>
   <Obj RefId="6">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface 3 (Wi-Fi)</S>
-      <Obj N="DownloadLinks" RefId="7">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=49040</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Book 2</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=56261</S>
+    </MS>
+  </Obj>
+  <Obj RefId="7">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Book 3</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=101315</S>
     </MS>
   </Obj>
   <Obj RefId="8">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface 3 (Y!mobile 4G LTE) and Surface 3 (4G LTE) outside of North America</S>
-      <Obj N="DownloadLinks" RefId="9">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=49041</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Dock and Surface Dock 2</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=101317</S>
+    </MS>
+  </Obj>
+  <Obj RefId="9">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Go</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=57439</S>
     </MS>
   </Obj>
   <Obj RefId="10">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Book</S>
-      <Obj N="DownloadLinks" RefId="11">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=49497</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Go 2 and Surface Go 2 LTE</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=101304</S>
+    </MS>
+  </Obj>
+  <Obj RefId="11">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Go 3</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=103504</S>
     </MS>
   </Obj>
   <Obj RefId="12">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Book 2</S>
-      <Obj N="DownloadLinks" RefId="13">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=56261</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Go 4</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=105609</S>
+    </MS>
+  </Obj>
+  <Obj RefId="13">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Go with LTE Advanced</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=57601</S>
     </MS>
   </Obj>
   <Obj RefId="14">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Book 3</S>
-      <Obj N="DownloadLinks" RefId="15">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=101315</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Hub 2</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=101974</S>
+    </MS>
+  </Obj>
+  <Obj RefId="15">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Laptop (1st Gen)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=55489</S>
     </MS>
   </Obj>
   <Obj RefId="16">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Dock and Surface Dock 2</S>
-      <Obj N="DownloadLinks" RefId="17">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=101317</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Laptop (7th Edition)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=106120</S>
+    </MS>
+  </Obj>
+  <Obj RefId="17">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Laptop 13-inch 1st Edition</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=108198</S>
     </MS>
   </Obj>
   <Obj RefId="18">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Go</S>
-      <Obj N="DownloadLinks" RefId="19">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=57439</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Laptop 2</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=57515</S>
+    </MS>
+  </Obj>
+  <Obj RefId="19">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Laptop 3 with AMD Processor</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=100428</S>
     </MS>
   </Obj>
   <Obj RefId="20">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Go 2 and Surface Go 2 LTE</S>
-      <Obj N="DownloadLinks" RefId="21">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=101304</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Laptop 3 with Intel Processor</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=100429</S>
+    </MS>
+  </Obj>
+  <Obj RefId="21">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Laptop 4 with AMD Processor</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=102923</S>
     </MS>
   </Obj>
   <Obj RefId="22">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Go 3</S>
-      <Obj N="DownloadLinks" RefId="23">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=103504</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Laptop 4 with Intel Processor</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=102924</S>
+    </MS>
+  </Obj>
+  <Obj RefId="23">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Laptop 5</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=104679</S>
     </MS>
   </Obj>
   <Obj RefId="24">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Go 4</S>
-      <Obj N="DownloadLinks" RefId="25">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=105609</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Laptop 5G for Business (7th Edition) with Intel</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=108347</S>
+    </MS>
+  </Obj>
+  <Obj RefId="25">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Laptop 6 for Business</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=105946</S>
     </MS>
   </Obj>
   <Obj RefId="26">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Go with LTE Advanced</S>
-      <Obj N="DownloadLinks" RefId="27">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=57601</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Laptop for Business (7th Edition)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=108014</S>
+    </MS>
+  </Obj>
+  <Obj RefId="27">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Laptop Go</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=102261</S>
     </MS>
   </Obj>
   <Obj RefId="28">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Hub 2</S>
-      <Obj N="DownloadLinks" RefId="29">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=101974</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Laptop Go 2</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=104251</S>
+    </MS>
+  </Obj>
+  <Obj RefId="29">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Laptop Go 3</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=105608</S>
     </MS>
   </Obj>
   <Obj RefId="30">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop (1st Gen)</S>
-      <Obj N="DownloadLinks" RefId="31">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=55489</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Laptop Studio</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=103505</S>
+    </MS>
+  </Obj>
+  <Obj RefId="31">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Laptop Studio 2</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=105610</S>
     </MS>
   </Obj>
   <Obj RefId="32">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop (7th Edition)</S>
-      <Obj N="DownloadLinks" RefId="33">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=106120</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Pro</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=49038</S>
+    </MS>
+  </Obj>
+  <Obj RefId="33">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Pro (11th Edition)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=106119</S>
     </MS>
   </Obj>
   <Obj RefId="34">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop 13-inch 1st Edition</S>
-      <Obj N="DownloadLinks" RefId="35">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=108198</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Pro (5th Gen)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=55484</S>
+    </MS>
+  </Obj>
+  <Obj RefId="35">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Pro 10 for Business</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=105947</S>
     </MS>
   </Obj>
   <Obj RefId="36">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop 2</S>
-      <Obj N="DownloadLinks" RefId="37">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=57515</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Pro 10 with 5G for Business</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=106292</S>
+    </MS>
+  </Obj>
+  <Obj RefId="37">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Pro 12-inch 1st Edition</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=108199</S>
     </MS>
   </Obj>
   <Obj RefId="38">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop 3 with AMD Processor</S>
-      <Obj N="DownloadLinks" RefId="39">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=100428</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Pro 2</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=49042</S>
+    </MS>
+  </Obj>
+  <Obj RefId="39">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Pro 3</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=38826</S>
     </MS>
   </Obj>
   <Obj RefId="40">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop 3 with Intel Processor</S>
-      <Obj N="DownloadLinks" RefId="41">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=100429</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Pro 4</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=49498</S>
+    </MS>
+  </Obj>
+  <Obj RefId="41">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Pro 6</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=57514</S>
     </MS>
   </Obj>
   <Obj RefId="42">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop 4 with AMD Processor</S>
-      <Obj N="DownloadLinks" RefId="43">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=102923</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Pro 7</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=100419</S>
+    </MS>
+  </Obj>
+  <Obj RefId="43">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Pro 7+ and Surface Pro 7+ LTE</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=102633</S>
     </MS>
   </Obj>
   <Obj RefId="44">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop 4 with Intel Processor</S>
-      <Obj N="DownloadLinks" RefId="45">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=102924</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Pro 8</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=103503</S>
+    </MS>
+  </Obj>
+  <Obj RefId="45">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Pro 9 with 5G (SQ3 Processor)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=105941</S>
     </MS>
   </Obj>
   <Obj RefId="46">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop 5</S>
-      <Obj N="DownloadLinks" RefId="47">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=104679</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Pro 9 with Intel Processor</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=104680</S>
+    </MS>
+  </Obj>
+  <Obj RefId="47">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Pro for Business (11th Edition)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=108013</S>
     </MS>
   </Obj>
   <Obj RefId="48">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop 5G for Business (7th Edition) with Intel</S>
-      <Obj N="DownloadLinks" RefId="49">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=108347</S>
-        </LST>
+      <S N="Model">Surface Pro with LTE Advanced</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=56278</S>
+    </MS>
+  </Obj>
+  <Obj RefId="49">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Pro X</S>
+      <Obj N="DownloadLinks" RefId="50">
+        <TNRef RefId="0" />
       </Obj>
     </MS>
   </Obj>
-  <Obj RefId="50">
+  <Obj RefId="51">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop 6 for Business</S>
-      <Obj N="DownloadLinks" RefId="51">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=105946</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Studio (1st Gen)</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=54311</S>
     </MS>
   </Obj>
   <Obj RefId="52">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop for Business (7th Edition)</S>
-      <Obj N="DownloadLinks" RefId="53">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=108014</S>
-        </LST>
-      </Obj>
+      <S N="Model">Surface Studio 2</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=57593</S>
+    </MS>
+  </Obj>
+  <Obj RefId="53">
+    <TNRef RefId="0" />
+    <MS>
+      <S N="Model">Surface Studio 2+</S>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=104681</S>
     </MS>
   </Obj>
   <Obj RefId="54">
     <TNRef RefId="0" />
     <MS>
-      <S N="Model">Surface Laptop Go</S>
-      <Obj N="DownloadLinks" RefId="55">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=102261</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="56">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Laptop Go 2</S>
-      <Obj N="DownloadLinks" RefId="57">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=104251</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="58">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Laptop Go 3</S>
-      <Obj N="DownloadLinks" RefId="59">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=105608</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="60">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Laptop Studio</S>
-      <Obj N="DownloadLinks" RefId="61">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=103505</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="62">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Laptop Studio 2</S>
-      <Obj N="DownloadLinks" RefId="63">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=105610</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="64">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro</S>
-      <Obj N="DownloadLinks" RefId="65">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=49038</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="66">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro (11th Edition)</S>
-      <Obj N="DownloadLinks" RefId="67">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=106119</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="68">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro (5th Gen)</S>
-      <Obj N="DownloadLinks" RefId="69">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=55484</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="70">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 10 for Business</S>
-      <Obj N="DownloadLinks" RefId="71">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=105947</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="72">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 10 with 5G for Business</S>
-      <Obj N="DownloadLinks" RefId="73">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=106292</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="74">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 12-inch 1st Edition</S>
-      <Obj N="DownloadLinks" RefId="75">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=108199</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="76">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 2</S>
-      <Obj N="DownloadLinks" RefId="77">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=49042</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="78">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 3</S>
-      <Obj N="DownloadLinks" RefId="79">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=38826</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="80">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 4</S>
-      <Obj N="DownloadLinks" RefId="81">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=49498</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="82">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 6</S>
-      <Obj N="DownloadLinks" RefId="83">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=57514</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="84">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 7</S>
-      <Obj N="DownloadLinks" RefId="85">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=100419</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="86">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 7+ and Surface Pro 7+ LTE</S>
-      <Obj N="DownloadLinks" RefId="87">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=102633</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="88">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 8</S>
-      <Obj N="DownloadLinks" RefId="89">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=103503</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="90">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 9 with 5G (SQ3 Processor)</S>
-      <Obj N="DownloadLinks" RefId="91">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=105941</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="92">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro 9 with Intel Processor</S>
-      <Obj N="DownloadLinks" RefId="93">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=104680</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="94">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro for Business (11th Edition)</S>
-      <Obj N="DownloadLinks" RefId="95">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=108013</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="96">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro with LTE Advanced</S>
-      <Obj N="DownloadLinks" RefId="97">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=56278</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="98">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Pro X</S>
-      <Obj N="DownloadLinks" RefId="99">
-        <TNRef RefId="1" />
-        <LST />
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="100">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Studio (1st Gen)</S>
-      <Obj N="DownloadLinks" RefId="101">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=54311</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="102">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Studio 2</S>
-      <Obj N="DownloadLinks" RefId="103">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=57593</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="104">
-    <TNRef RefId="0" />
-    <MS>
-      <S N="Model">Surface Studio 2+</S>
-      <Obj N="DownloadLinks" RefId="105">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=104681</S>
-        </LST>
-      </Obj>
-    </MS>
-  </Obj>
-  <Obj RefId="106">
-    <TNRef RefId="0" />
-    <MS>
       <S N="Model">Surface Thunderbolt™ 4 Dock</S>
-      <Obj N="DownloadLinks" RefId="107">
-        <TNRef RefId="1" />
-        <LST>
-          <S>https://www.microsoft.com/download/details.aspx?id=105115</S>
-        </LST>
-      </Obj>
+      <S N="DownloadLinks">https://www.microsoft.com/download/details.aspx?id=105115</S>
     </MS>
   </Obj>
 </Objs>
