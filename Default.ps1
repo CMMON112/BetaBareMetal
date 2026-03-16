@@ -32,6 +32,7 @@ param(
 
     [string] $DriverCatalogUrl = "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-driverpackcatalog.xml",
     [string] $OSCatalogUrl     = "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-oscatalog.xml",
+    [string] $SurfaceProductManifest = "https://raw.githubusercontent.com/CMMON112/BetaBareMetal/refs/heads/main/build-surfaceproductlinks.xml",
 
     # Optional targeting & rerun controls
     [int]    $TargetDiskNumber = -1,
@@ -780,6 +781,7 @@ function Get-EntryValue($Obj, [string[]]$Names) {
 function Get-HardwareIdentity {
     $bb = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue
     $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+    $Pr = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue
 
     $bbSku = $bb.SKU
     if ([string]::IsNullOrWhiteSpace($bbSku)) { $bbSku = $bb.SKU }
@@ -791,96 +793,10 @@ function Get-HardwareIdentity {
         BBModel        = $bb.Model
         BBSKU          = $bbSku
         BBProduct      = $bb.Product
+        PrManufacturer = $Pr.Manufacturer
     }
 }
 
-function Find-DriverPackMatch {
-    param(
-        [Parameter(Mandatory)][object]$Hardware,
-        [Parameter(Mandatory)][object[]]$DriverCatalog,
-        [int]$MinScore = 6
-    )
-
-    function Normalize([string]$s) {
-        if ([string]::IsNullOrWhiteSpace($s)) { return $null }
-        (($s -replace '\s+',' ').Trim()).ToUpperInvariant()
-    }
-
-    $weights = @{
-        BBProduct      = 6
-        BBSKU          = 6
-        CSModel        = 4
-        BBModel        = 3
-        CSManufacturer = 2
-        BBManufacturer = 2
-    }
-    $penalty = 2
-
-    $hw = [pscustomobject]@{
-        CSManufacturer = Normalize $Hardware.CSManufacturer
-        CSModel        = Normalize $Hardware.CSModel
-        BBManufacturer = Normalize $Hardware.BBManufacturer
-        BBModel        = Normalize $Hardware.BBModel
-        BBSKU          = Normalize $Hardware.BBSKU
-        BBProduct      = Normalize $Hardware.BBProduct
-    }
-
-    $scored = foreach ($item in $DriverCatalog) {
-        $entry = [pscustomobject]@{
-            CSManufacturer = Normalize (Get-EntryValue $item @('CSManufacturer','ComputerSystemManufacturer','Manufacturer'))
-            CSModel        = Normalize (Get-EntryValue $item @('CSModel','ComputerSystemModel','Model'))
-            BBManufacturer = Normalize (Get-EntryValue $item @('BBManufacturer','BaseBoardManufacturer'))
-            BBModel        = Normalize (Get-EntryValue $item @('BBModel','BaseBoardModel'))
-            BBSKU          = Normalize (Get-EntryValue $item @('BBSKU','SKUNumber','SKU'))
-            BBProduct      = Normalize (Get-EntryValue $item @('BBProduct','Product'))
-            URL            = Get-EntryValue $item @('URL','Url','Uri','DownloadUrl','DriverUrl')
-            Sha1           = Get-EntryValue $item @('Sha1','SHA1','SHA-1','HashSha1')
-            Sha256         = Get-EntryValue $item @('Sha256','SHA256','SHA-256','HashSha256')
-        }
-
-        $score=0; $compared=0; $exact=0; $matched=@()
-        foreach ($k in $weights.Keys) {
-            $hv = $hw.$k
-            $ev = $entry.$k
-            if ($hv -and $ev) {
-                $compared++
-                if ($hv -eq $ev) { $exact++; $score += $weights[$k]; $matched += $k }
-                else { $score -= $penalty }
-            }
-        }
-
-        [pscustomobject]@{
-            Score=$score; Compared=$compared; Exact=$exact; HasUrl=[bool]$entry.URL;
-            Matched=($matched -join ','); Entry=$entry
-        }
-    }
-
-    if (($scored | Measure-Object Compared -Maximum).Maximum -eq 0) {
-        return [pscustomobject]@{ Matched=$false; Reason="No comparable fields."; Candidates=$scored }
-    }
-
-    $ordered = $scored | Sort-Object Score,Exact,Compared,HasUrl -Descending
-    $top = $ordered | Select-Object -First 1
-
-    if ($top.Score -lt $MinScore -or -not $top.HasUrl) {
-        return [pscustomobject]@{
-            Matched=$false
-            Reason="No driver match met minimum score ($MinScore). BestScore=$($top.Score)"
-            Candidates=($ordered | Select-Object -First 10)
-        }
-    }
-
-    [pscustomobject]@{
-        Matched=$true
-        Score=$top.Score
-        Compared=$top.Compared
-        Exact=$top.Exact
-        URL=$top.Entry.URL
-        Sha1=$top.Entry.Sha1
-        Sha256=$top.Entry.Sha256
-        MatchInfo=$top.Matched
-    }
-}
 
 function Get-HPClientDriverPackCatalogXml {
     [CmdletBinding()]
@@ -897,7 +813,6 @@ function Get-HPClientDriverPackCatalogXml {
 
     Invoke-Download -Url $CabUrl -DestPath $cabPath | Out-Null
 
-    # Expand CAB to XML. OSD does: Expand "cab" "xml" [1](https://www.powershellgallery.com/packages/OSD/21.4.8.1/Content/Public%5CCatalog%5CGet-CatalogHPDriverPack.ps1)
     $expandExe = Join-Path $env:WINDIR "System32\expand.exe"
     if (-not (Test-Path -LiteralPath $expandExe)) { $expandExe = "expand.exe" }
 
@@ -925,7 +840,7 @@ function Import-HPClientDriverPackCatalog {
 
     [xml]$x = Get-Content -LiteralPath $XmlPath -Raw
 
-    # These nodes are the canonical dataset paths used by OSD/OSDCloud [1](https://www.powershellgallery.com/packages/OSD/21.4.8.1/Content/Public%5CCatalog%5CGet-CatalogHPDriverPack.ps1)
+
     $softPaqs = @($x.NewDataSet.HPClientDriverPackCatalog.SoftPaqList.SoftPaq)
     $mapRows  = @($x.NewDataSet.HPClientDriverPackCatalog.ProductOSDriverPackList.ProductOSDriverPack)
 
@@ -1253,7 +1168,7 @@ function Inject-DriversIntoWinREWim {
     }
 }
 
-function Stage-WinREMinimalDrivers {
+function Export-WinREMinimalDrivers {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DriverRoot,
@@ -1749,6 +1664,10 @@ Invoke-Step "5" "Download catalogs" {
     Write-Log "Downloading driver pack catalog" 'INFO'
     $script:DriverCatalog = Get-Catalog -CatalogUrl $DriverCatalogUrl
 
+    # Download Surface catalog
+    Write-Log "Downloading driver pack catalog" 'INFO'
+    $script:DriverCatalog = Get-Catalog -CatalogUrl $DriverCatalogUrl
+
     Write-Log "Catalogs downloaded and loaded successfully" 'OK'
 }
 
@@ -2146,7 +2065,7 @@ Invoke-Step "19.5" "Inject System/HID/USB/Net drivers into WinRE.wim" {
     # -----------------------------------------------------------------
     $subsetStage = Join-Path $script:BuildForgeRoot 'WinRE_MinimalDrivers'
 
-    $subset = Stage-WinREMinimalDrivers `
+    $subset = Export-WinREMinimalDrivers `
         -DriverRoot $script:DriverExtractDir `
         -StageRoot  $subsetStage
 
